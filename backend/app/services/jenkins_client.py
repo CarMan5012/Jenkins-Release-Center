@@ -1,0 +1,381 @@
+import time
+import requests
+from typing import Dict, Any, List, Tuple, Optional
+from loguru import logger
+from urllib.parse import urljoin, quote
+from app.core.security import decrypt_secret
+
+class SafeSession(requests.Session):
+    def resolve_redirects(self, resp, req, **kwargs):
+        from urllib.parse import urlparse
+        orig_parsed = urlparse(resp.url)
+        orig_origin = f"{orig_parsed.scheme}://{orig_parsed.netloc}"
+        
+        for redirect_resp in super().resolve_redirects(resp, req, **kwargs):
+            if hasattr(redirect_resp, "url"):
+                target_url = redirect_resp.url
+            else:
+                target_url = redirect_resp.req.url
+                
+            target_parsed = urlparse(target_url)
+            target_origin = f"{target_parsed.scheme}://{target_parsed.netloc}"
+            if target_origin != orig_origin:
+                raise requests.exceptions.InvalidSchema("禁止跨 Origin 重定向")
+            yield redirect_resp
+
+class JenkinsClient:
+    def __init__(self, url: str, username: str, encrypted_token: str):
+        # Clean URL to prevent trailing "/login" copied from browser address bar
+        url_clean = url.rstrip('/')
+        if url_clean.endswith('/login'):
+            url_clean = url_clean[:-6]
+        self.base_url = url_clean if url_clean.endswith('/') else url_clean + '/'
+        self.username = username
+        try:
+            self.token = decrypt_secret(encrypted_token)
+        except Exception:
+            # Fallback for unit testing where key encryption is not set or token is raw
+            self.token = encrypted_token
+        self.auth = (self.username, self.token)
+        self.session = SafeSession()
+        self.session.auth = self.auth
+        # Standard retries for network resilience
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10, 
+            pool_maxsize=20, 
+            max_retries=3
+        )
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
+    def get_crumb_headers(self) -> Dict[str, str]:
+        """
+        Fetch Jenkins CSRF crumb if enabled.
+        """
+        try:
+            url = urljoin(self.base_url, "crumbIssuer/api/json")
+            response = self.session.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                crumb = data.get("crumb")
+                field = data.get("crumbRequestField", "Jenkins-Crumb")
+                if crumb:
+                    return {field: crumb}
+        except Exception as e:
+            logger.debug(f"CSRF crumb is not enabled or failed to fetch: {str(e)}")
+        return {}
+
+    def test_connection(self) -> Tuple[bool, str]:
+        """
+        Verify credentials and connection with Jenkins.
+        """
+        try:
+            url = urljoin(self.base_url, "api/json")
+            response = self.session.get(url, timeout=10)
+            if response.status_code == 200:
+                return True, "连接 Jenkins 成功"
+            return False, f"HTTP 错误 {response.status_code}：{response.text[:200]}"
+        except Exception as e:
+            return False, str(e)
+
+    def get_views(self) -> List[Dict[str, Any]]:
+        """
+        Fetch all Jenkins views to map them as release environments.
+        """
+        url = urljoin(self.base_url, "api/json?tree=views[name,url]")
+        response = self.session.get(url, timeout=15)
+        response.raise_for_status()
+        return response.json().get("views", [])
+
+    def get_jobs_in_view(self, view_name: str) -> List[Dict[str, Any]]:
+        """
+        Fetch all jobs nested in a specific view.
+        """
+        encoded_view = quote(view_name)
+        # Fetching nested job information, including last build details
+        url = urljoin(self.base_url, f"view/{encoded_view}/api/json?tree=jobs[name,url,color,description,lastBuild[number,result,timestamp]]")
+        response = self.session.get(url, timeout=15)
+        response.raise_for_status()
+        return response.json().get("jobs", [])
+
+    def trigger_build(
+        self, 
+        job_name: str, 
+        parameters: Optional[Dict[str, Any]] = None, 
+        branch: Optional[str] = None
+    ) -> str:
+        """
+        Trigger a build. Handles both standard and parameterized builds.
+        Returns the queue URL of the build.
+        """
+        job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
+        
+        merged_params = {}
+        if parameters:
+            merged_params.update(parameters)
+            
+        if branch:
+            # 1. Try to find the exact Git Parameter name configured in Jenkins
+            branch_param_name = "branch" # default fallback
+            try:
+                url = urljoin(self.base_url, f"{job_path}/api/json?tree=property[parameterDefinitions[*]],actions[parameterDefinitions[*]]")
+                response = self.session.get(url, timeout=5)
+                if response.status_code == 200:
+                    data = response.json()
+                    definitions = []
+                    for prop in data.get("property", []):
+                        if prop and "parameterDefinitions" in prop:
+                            definitions.extend(prop["parameterDefinitions"])
+                    for act in data.get("actions", []):
+                        if act and "parameterDefinitions" in act:
+                            definitions.extend(act["parameterDefinitions"])
+                            
+                    for p in definitions:
+                        p_class = p.get("_class") or p.get("type", "")
+                        p_name = p.get("name")
+                        if p_name and ("gitparameter" in p_class.lower() or "git_parameter" in p_class.lower()):
+                            branch_param_name = p_name
+                            break
+            except Exception as e:
+                logger.debug(f"Failed to fetch parameter name for trigger_build: {str(e)}")
+                
+            merged_params[branch_param_name] = branch
+            
+        headers = self.get_crumb_headers()
+        if merged_params:
+            url = urljoin(self.base_url, f"{job_path}/buildWithParameters")
+            response = self.session.post(url, data=merged_params, headers=headers, timeout=10)
+        else:
+            url = urljoin(self.base_url, f"{job_path}/build")
+            response = self.session.post(url, headers=headers, timeout=10)
+        
+        if response.status_code in [200, 201]:
+            location = response.headers.get("Location")
+            if not location:
+                raise Exception("Build triggered but Location header was missing in Jenkins response.")
+            return location
+        raise Exception(f"Failed to trigger build: HTTP {response.status_code} - {response.text}")
+
+    def get_build_number_from_queue(self, queue_url: str, timeout: int = 300) -> int:
+        """
+        Polls the queue URL until the job gets scheduled, returning the actual build number.
+        This provides high concurrency safety.
+        """
+        # Validate queue_url origin against base_url origin
+        from urllib.parse import urlparse
+        queue_parsed = urlparse(queue_url)
+        base_parsed = urlparse(self.base_url)
+        if queue_parsed.netloc and queue_parsed.scheme:
+            queue_origin = f"{queue_parsed.scheme}://{queue_parsed.netloc}"
+            base_origin = f"{base_parsed.scheme}://{base_parsed.netloc}"
+            if queue_origin != base_origin:
+                raise Exception("队列 URL 与配置的 Jenkins Origin 不一致，已拒绝请求")
+
+        # Ensure the queue URL points to our JSON API
+        api_url = queue_url if queue_url.endswith('/') else queue_url + '/'
+        
+        # Scheme alignment: if base_url is HTTPS but queue_url returned is HTTP (e.g. proxy configuration issue),
+        # force HTTPS to avoid network block or redirect issues inside container.
+        if self.base_url.startswith("https://") and api_url.startswith("http://"):
+            api_url = "https://" + api_url[7:]
+        elif self.base_url.startswith("http://") and api_url.startswith("https://"):
+            api_url = "http://" + api_url[8:]
+            
+        api_url = urljoin(api_url, "api/json")
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                response = self.session.get(api_url, timeout=5)
+                if response.status_code == 200:
+                    data = response.json()
+                    # If 'executable' exists, it means the build has started execution
+                    if "executable" in data:
+                        return data["executable"].get("number")
+                    if data.get("cancelled", False):
+                        raise Exception("The build task in Jenkins queue was cancelled.")
+                    why = data.get("why", "")
+                    if why:
+                        logger.info(f"Build pending in queue: {why}")
+            except Exception as e:
+                logger.warning(f"Error querying Jenkins queue item: {str(e)}")
+            time.sleep(3)
+        raise Exception(f"Timeout ({timeout}s) waiting for build number. Queue URL: {queue_url}")
+
+    def get_build_status(self, job_name: str, build_number: int) -> Dict[str, Any]:
+        """
+        Query build status and details.
+        """
+        job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
+        url = urljoin(self.base_url, f"{job_path}/{build_number}/api/json")
+        response = self.session.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "building": data.get("building", False),
+                "result": data.get("result"), # SUCCESS, FAILURE, ABORTED, etc.
+                "timestamp": data.get("timestamp"), # Epoch ms
+                "duration": data.get("duration", 0) // 1000, # seconds
+                "url": data.get("url")
+            }
+        raise Exception(f"Failed to fetch build status: HTTP {response.status_code}")
+
+    def get_branches_and_tags(self, job_name: str) -> List[str]:
+        """
+        Dynamically query git branches/tags for a specific job.
+        Tries to dynamically detect Git Parameter definition from Job config,
+        then calls its descriptor endpoint. Fallbacks to default branch list.
+        """
+        job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
+        
+        # 1. Try to fetch the Job parameter definitions dynamically
+        git_params = []
+        try:
+            url = urljoin(self.base_url, f"{job_path}/api/json?tree=property[parameterDefinitions[*]],actions[parameterDefinitions[*]]")
+            response = self.session.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                definitions = []
+                for prop in data.get("property", []):
+                    if prop and "parameterDefinitions" in prop:
+                        definitions.extend(prop["parameterDefinitions"])
+                for act in data.get("actions", []):
+                    if act and "parameterDefinitions" in act:
+                        definitions.extend(act["parameterDefinitions"])
+                        
+                for p in definitions:
+                    p_class = p.get("_class") or p.get("type", "")
+                    p_name = p.get("name")
+                    if p_name and ("gitparameter" in p_class.lower() or "git_parameter" in p_class.lower()):
+                        git_params.append((p_name, p_class))
+        except Exception as e:
+            logger.debug(f"Failed to fetch parameter definitions for job {job_name}: {str(e)}")
+            
+        # 2. If Git parameter definitions are found, query them using their actual classes
+        if git_params:
+            for p_name, p_class in git_params:
+                try:
+                    endpoint = f"{job_path}/descriptorByName/{p_class}/fillValueItems"
+                    url = urljoin(self.base_url, endpoint)
+                    response = self.session.get(url, params={"param": p_name}, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        values = data.get("values", [])
+                        if values:
+                            res = []
+                            for item in values:
+                                val = item.get("value")
+                                if val:
+                                    res.append(val)
+                            return res
+                except Exception as e:
+                    logger.debug(f"Git Parameter poll failed for parameter '{p_name}' using class '{p_class}': {str(e)}")
+                    
+        # 3. Fallback heuristic search if dynamic loading failed
+        potential_params = ["branch", "BRANCH", "tag", "TAG", "git_parameter", "GitParameter"]
+        potential_classes = [
+            "net.uaznia.lukanus.hudson.plugins.gitparameter.GitParameterDefinition",
+            "net.uaznia.lukanus.jenkins.plugins.gitparameter.GitParameterDefinition"
+        ]
+        for param in potential_params:
+            for p_class in potential_classes:
+                try:
+                    endpoint = f"{job_path}/descriptorByName/{p_class}/fillValueItems"
+                    url = urljoin(self.base_url, endpoint)
+                    response = self.session.get(url, params={"param": param}, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        values = data.get("values", [])
+                        if values:
+                            res = []
+                            for item in values:
+                                val = item.get("value")
+                                if val:
+                                    res.append(val)
+                            return res
+                except Exception as e:
+                    continue
+                    
+        # Default fallback branch values
+        return ["master", "develop", "release", "main"]
+
+    def get_progressive_log(self, job_name: str, build_number: int, start: int = 0) -> Tuple[str, int, bool]:
+        """
+        Fetches progressive console log text from Jenkins.
+        Returns: Tuple[log_text, next_start_byte_offset, has_more_data]
+        """
+        job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
+        url = urljoin(self.base_url, f"{job_path}/{build_number}/logText/progressiveText")
+        try:
+            headers = self.get_crumb_headers()
+            response = self.session.post(url, data={"start": start}, headers=headers, timeout=10)
+            if response.status_code == 200:
+                log_text = response.text
+                next_start = int(response.headers.get("X-Text-Size", start))
+                has_more = response.headers.get("X-More-Data") == "true"
+                return log_text, next_start, has_more
+            elif response.status_code == 404:
+                # Build may have not initialized yet
+                return "Waiting for build console output to generate...", start, True
+            else:
+                return f"HTTP Error {response.status_code} while reading logs.", start, False
+        except Exception as e:
+            return f"Error retrieving build logs: {str(e)}", start, False
+
+    def get_build_numbers(self, job_name: str) -> set[int] | None:
+        """
+        Fetch every build number for safe deletion reconciliation.
+        None means Jenkins could not provide an inventory; an empty set is valid.
+        """
+        job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
+        url = urljoin(self.base_url, f"{job_path}/api/json?tree=builds[number]")
+        try:
+            response = self.session.get(url, timeout=10)
+            if response.status_code == 200:
+                return {
+                    build["number"]
+                    for build in response.json().get("builds", [])
+                    if isinstance(build.get("number"), int)
+                }
+            logger.warning(f"Failed to fetch build numbers for job {job_name}: HTTP {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch build numbers for job {job_name}: {str(e)}")
+        return None
+
+    def get_recent_builds(self, job_name: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Fetch recent builds for a job including number, result, timestamp, duration and causes.
+        """
+        try:
+            job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
+            # Use Jenkins API slicing feature to retrieve only the last N builds
+            url = urljoin(self.base_url, f"{job_path}/api/json?tree=builds[number,result,timestamp,duration,building,actions[causes[userName,shortDescription]]]{{0,{limit}}}")
+            response = self.session.get(url, timeout=10)
+            if response.status_code == 200:
+                return response.json().get("builds", [])
+        except Exception as e:
+            logger.warning(f"Failed to fetch recent builds for job {job_name}: {str(e)}")
+        return []
+
+    def get_job_parameters(self, job_name: str) -> List[str]:
+        job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
+        url = urljoin(self.base_url, f"{job_path}/api/json?tree=property[parameterDefinitions[*]],actions[parameterDefinitions[*]]")
+        try:
+            response = self.session.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                definitions = []
+                for prop in data.get("property", []):
+                    if prop and "parameterDefinitions" in prop:
+                        definitions.extend(prop["parameterDefinitions"])
+                for act in data.get("actions", []):
+                    if act and "parameterDefinitions" in act:
+                        definitions.extend(act["parameterDefinitions"])
+                return [p.get("name") for p in definitions if p.get("name")]
+            elif response.status_code == 404:
+                return []
+            else:
+                raise Exception(f"HTTP {response.status_code}")
+        except Exception as e:
+            logger.debug(f"Failed to fetch parameter definitions for job {job_name}: {str(e)}")
+            raise Exception(f"无法获取 Jenkins 任务的参数定义: {str(e)}")

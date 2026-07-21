@@ -1,0 +1,11 @@
+backend/data/
+backend/venv/
+**/__pycache__/
+*.pyc
+*.db
+*.pem
+*.key
+*.zip
+*.enc
+.env
+sqlite_key

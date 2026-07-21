@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  jenkins-release-center:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jenkins-release-center
+    restart: always
+    ports:
+      - "127.0.0.1:8021:8001"
+    environment:
+      - APP_ENV=development
+      - DB_TYPE=sqlite
+      - SQLITE_PATH=/app/data/release-center.db
+      - SQLITE_KEY_FILE=/run/secrets/sqlite_key
+      - INITIAL_ADMIN_USERNAME=admin
+      - INITIAL_ADMIN_PASSWORD=admin123
+      - BACKUP_TMP_DIR=/tmp/jenkins-release-backups
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./backend/data:/app/data
+    tmpfs:
+      - /tmp/jenkins-release-backups
+    secrets:
+      - sqlite_key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+
+secrets:
+  sqlite_key:
+    file: ./sqlite_key

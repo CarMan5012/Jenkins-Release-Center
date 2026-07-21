@@ -1,0 +1,17 @@
+# 极其敏感的文件 (防止核心密钥泄露)
+sqlite_key
+*.pem
+*.key
+
+# 本地数据与加密数据库备份
+backend/data/*.db
+backend/data/*.pem
+
+# 编译依赖、环境变量与系统缓存
+__pycache__/
+*.pyc
+.env
+node_modules/
+dist/
+.agents/
+.gemini/

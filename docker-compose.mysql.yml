@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: release-scheduler-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: jenkins_release_scheduler
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:3316:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  jenkins-release-center:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jenkins-release-center
+    restart: always
+    ports:
+      - "127.0.0.1:8021:8001"
+    environment:
+      - APP_ENV=development
+      - DB_TYPE=mysql
+      - DATABASE_URL=mysql+pymysql://root:root123456@db:3306/jenkins_release_scheduler?charset=utf8mb4
+      - INITIAL_ADMIN_USERNAME=admin
+      - INITIAL_ADMIN_PASSWORD=admin123
+      - BACKUP_TMP_DIR=/tmp/jenkins-release-backups
+      - TZ=Asia/Shanghai
+    tmpfs:
+      - /tmp/jenkins-release-backups
+    depends_on:
+      - db
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+
+volumes:
+  mysql_data:
