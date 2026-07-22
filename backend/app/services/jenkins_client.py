@@ -202,6 +202,17 @@ class JenkinsClient:
             time.sleep(3)
         raise Exception(f"Timeout ({timeout}s) waiting for build number. Queue URL: {queue_url}")
 
+    def stop_build(self, job_name: str, build_number: int) -> None:
+        job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
+        url = urljoin(self.base_url, f"{job_path}/{build_number}/stop")
+        response = self.session.post(
+            url,
+            headers=self.get_crumb_headers(),
+            timeout=10,
+            allow_redirects=False,
+        )
+        if not (200 <= response.status_code < 300 or response.status_code == 302):
+            raise Exception(f"Failed to stop build: HTTP {response.status_code} - {response.text}")
     def get_build_status(self, job_name: str, build_number: int) -> Dict[str, Any]:
         """
         Query build status and details.

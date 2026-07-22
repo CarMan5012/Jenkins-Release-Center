@@ -43,6 +43,22 @@ def test_jenkins_trigger_build_with_parameters(mock_post):
     )
 
 
+@patch('requests.Session.post')
+def test_jenkins_stop_build_posts_to_stop_endpoint(mock_post):
+    mock_response = MagicMock()
+    mock_response.status_code = 302
+    mock_post.return_value = mock_response
+
+    client = JenkinsClient("http://localhost:8080", "admin", "token123")
+    client.stop_build("folder/frontend-deploy", 42)
+
+    mock_post.assert_called_once_with(
+        "http://localhost:8080/job/folder/job/frontend-deploy/42/stop",
+        headers={},
+        timeout=10,
+        allow_redirects=False,
+    )
+
 def test_read_backup_details_returns_structured_json(tmp_path):
     archive_path = tmp_path / "backup.zip"
     expected = {

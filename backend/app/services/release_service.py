@@ -178,6 +178,13 @@ def execute_task_workflow(plan_id: int, task_id: int):
         task.console_url = f"{server.url.rstrip('/')}/{job_path}/{build_number}/console"
         db.commit()
 
+        # Cancellation may arrive while Jenkins is still assigning a build number.
+        db.refresh(task)
+        if task.status == "CANCELLED":
+            logger.info(f"Task {task_id} was cancelled while queued. Stopping Jenkins build #{build_number}.")
+            client.stop_build(task.job_name, build_number)
+            return
+
         # 5. Poll Build Result Status
         logger.info(f"Polling build state for job: {task.job_name} #{build_number}")
         poll_interval = 8

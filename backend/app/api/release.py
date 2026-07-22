@@ -289,6 +289,23 @@ def cancel_plan(
     if plan.status in ["SUCCESS", "FAILED", "CANCELLED"]:
         raise HTTPException(status_code=400, detail="无法停止已经结束的发布计划")
         
+    from app.models.jenkins import JenkinsServer
+    from app.services.jenkins_client import JenkinsClient
+
+    # Stop remote builds before reporting local cancellation success.
+    for t in plan.tasks:
+        if t.status == "RUNNING" and t.build_number:
+            server = db.get(JenkinsServer, t.server_id)
+            if not server:
+                raise HTTPException(status_code=409, detail="关联的 Jenkins 实例不存在，无法停止远端构建")
+            try:
+                JenkinsClient(server.url, server.username, server.api_token).stop_build(
+                    t.job_name,
+                    t.build_number,
+                )
+            except Exception as error:
+                raise HTTPException(status_code=502, detail=f"停止 Jenkins 构建失败: {error}")
+
     # Remove from APScheduler
     for t in plan.tasks:
         scheduler_manager.remove_release_job(plan.id, t.id)
