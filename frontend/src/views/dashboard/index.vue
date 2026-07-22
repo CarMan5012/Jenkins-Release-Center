@@ -323,21 +323,26 @@ function retryPlan(plan: ReleasePlan) {
     return;
   }
   runAction(`retry-${plan.id}`, async () => {
-    await request.post('/release/plans', {
+    const retryType = plan.type === 'PIPELINE' ? 'PIPELINE' : 'IMMEDIATE';
+    const response = await request.post('/release/plans', {
       name: `Retry ${plan.name}`,
-      type: 'IMMEDIATE',
-      execute_time: null,
+      type: retryType,
+      execute_time: retryType === 'PIPELINE' ? new Date(Date.now() + 5 * 60_000).toISOString() : null,
       interval_minutes: plan.interval_minutes || 0,
       pipeline_failure_strategy: plan.pipeline_failure_strategy || 'STOP',
       tasks: plan.tasks.map((task, index) => ({
         server_id: task.server_id,
         job_id: task.job_id,
+        job_name: task.job_name,
         branch: task.branch,
         parameters: task.parameters || {},
         sequence: index,
-        depends_on_sequence: null,
+        depends_on_sequence: retryType === 'PIPELINE' && index > 0 ? index - 1 : null,
       })),
     });
+    if (retryType === 'PIPELINE') {
+      await request.post(`/release/plans/${response.data.id}/trigger`);
+    }
     message.success('已创建重试任务。');
   });
 }

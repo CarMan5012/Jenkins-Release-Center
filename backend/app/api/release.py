@@ -81,11 +81,11 @@ def validate_release_plan_input(db: Session, plan_in: ReleasePlanCreate):
             if part in (".", "..") or not part:
                 raise HTTPException(status_code=400, detail="非法的 Jenkins 任务名称，禁止包含 '.'、'..' 或空片段")
                 
-        # 依赖性校验
+        # PIPELINE is strictly serial: every task after the first depends on its predecessor.
         if plan_in.type == "PIPELINE":
-            if task_in.depends_on_sequence is not None:
-                if task_in.depends_on_sequence < 0 or task_in.depends_on_sequence >= task_in.sequence:
-                    raise HTTPException(status_code=400, detail="管道依赖关系非法，不能依赖自身、后置任务或负序号任务")
+            expected_dependency = None if task_in.sequence == 0 else task_in.sequence - 1
+            if task_in.depends_on_sequence != expected_dependency:
+                raise HTTPException(status_code=400, detail="流水线任务必须依赖前一个任务")
                     
         # 校验参数数量
         params = task_in.parameters or {}

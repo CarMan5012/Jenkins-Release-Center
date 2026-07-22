@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import vm from 'node:vm';
@@ -8,6 +8,16 @@ const require = createRequire(import.meta.url);
 const sourcePath = new URL('../src/utils/release-ui.ts', import.meta.url);
 const source = fs.existsSync(sourcePath) ? fs.readFileSync(sourcePath, 'utf8') : '';
 assert.ok(source, 'release-ui helper exists');
+
+const releaseViewSource = fs.readFileSync(new URL('../src/views/release/index.vue', import.meta.url), 'utf8');
+const dashboardSource = fs.readFileSync(new URL('../src/views/dashboard/index.vue', import.meta.url), 'utf8');
+
+for (const viewSource of [releaseViewSource, dashboardSource]) {
+  assert.match(viewSource, /depends_on_sequence: .*PIPELINE.*index > 0.*index - 1.*null/);
+  assert.match(viewSource, /retryType = plan\.type === 'PIPELINE' \? 'PIPELINE' : 'IMMEDIATE'/);
+  assert.match(viewSource, /\/release\/plans\/\$\{response\.data\.id\}\/trigger/);
+}
+assert.doesNotMatch(releaseViewSource, /getDependencyOptions/);
 
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: {

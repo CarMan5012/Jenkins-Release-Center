@@ -326,17 +326,18 @@ def handle_pipeline_success(db: Session, plan_id: int, task_id: int):
         return
         
     if plan.type == "PIPELINE":
-        # Lookup the next task that depends on the current task
-        next_task = db.query(ReleaseTask).filter(
+        # Start every dependant to safely handle branching plans created by older versions.
+        next_tasks = db.query(ReleaseTask).filter(
             ReleaseTask.plan_id == plan_id,
             ReleaseTask.depends_on_task_id == task_id,
             ReleaseTask.status == "WAITING"
-        ).first()
+        ).all()
         
-        if next_task:
-            logger.info(f"Triggering pipeline step: Task ID={next_task.id} depending on Task ID={task_id}")
-            t = threading.Thread(target=execute_task_workflow, args=(plan_id, next_task.id))
-            t.start()
+        if next_tasks:
+            for next_task in next_tasks:
+                logger.info(f"Triggering pipeline step: Task ID={next_task.id} depending on Task ID={task_id}")
+                t = threading.Thread(target=execute_task_workflow, args=(plan_id, next_task.id))
+                t.start()
             return
             
     # Check if entire plan has ended
@@ -367,16 +368,17 @@ def handle_pipeline_failure(db: Session, plan_id: int, task_id: int):
             db.commit()
             return
         else: # CONTINUE
-            # Try to launch next waiting step anyway
-            next_task = db.query(ReleaseTask).filter(
+            # Launch every waiting dependant for compatibility with legacy branching plans.
+            next_tasks = db.query(ReleaseTask).filter(
                 ReleaseTask.plan_id == plan_id,
                 ReleaseTask.depends_on_task_id == task_id,
                 ReleaseTask.status == "WAITING"
-            ).first()
-            if next_task:
-                logger.info(f"Pipeline error strategy is CONTINUE. Launching next step: Task ID={next_task.id}")
-                t = threading.Thread(target=execute_task_workflow, args=(plan_id, next_task.id))
-                t.start()
+            ).all()
+            if next_tasks:
+                for next_task in next_tasks:
+                    logger.info(f"Pipeline error strategy is CONTINUE. Launching next step: Task ID={next_task.id}")
+                    t = threading.Thread(target=execute_task_workflow, args=(plan_id, next_task.id))
+                    t.start()
                 return
 
     check_and_finalize_plan(db, plan_id)

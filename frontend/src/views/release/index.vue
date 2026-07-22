@@ -113,10 +113,6 @@
             <n-select v-model:value="task.job_id" :options="taskJobOptions[index] || []" placeholder="Job" @update:value="(value) => onTaskJobChange(Number(value), index)" />
             <n-select v-model:value="task.branch" :options="taskBranchOptions[index] || []" placeholder="分支/Tag" filterable tag />
           </div>
-          <div v-if="wizardForm.type === 'PIPELINE' && index > 0" class="dependency-row">
-            <span>依赖任务</span>
-            <n-select v-model:value="task.depends_on_sequence" :options="getDependencyOptions(index)" style="width: 220px" />
-          </div>
         </div>
         <n-button dashed block type="primary" @click="addTaskRow">添加任务</n-button>
       </div>
@@ -377,7 +373,15 @@ function retryPlan(plan: ReleasePlan) {
     return;
   }
   runAction(`retry-${plan.id}`, async () => {
-    await request.post('/release/plans', buildPayload(plan, `Retry ${plan.name}`, 'IMMEDIATE'));
+    const retryType = plan.type === 'PIPELINE' ? 'PIPELINE' : 'IMMEDIATE';
+    const payload = buildPayload(plan, `Retry ${plan.name}`, retryType);
+    if (retryType === 'PIPELINE') {
+      payload.execute_time = new Date(Date.now() + 5 * 60_000).toISOString();
+    }
+    const response = await request.post('/release/plans', payload);
+    if (retryType === 'PIPELINE') {
+      await request.post(`/release/plans/${response.data.id}/trigger`);
+    }
     message.success('已创建重试任务。');
   });
 }
@@ -396,7 +400,7 @@ function buildPayload(plan: ReleasePlan, name = plan.name, type = plan.type) {
       branch: task.branch,
       parameters: task.parameters || {},
       sequence: index,
-      depends_on_sequence: null,
+      depends_on_sequence: type === 'PIPELINE' && index > 0 ? index - 1 : null,
     })),
   };
 }
@@ -490,10 +494,6 @@ function addTaskRow() {
 
 function removeTaskRow(index: number) {
   wizardForm.value.tasks.splice(index, 1);
-}
-
-function getDependencyOptions(index: number): SelectOption[] {
-  return Array.from({ length: index }, (_, itemIndex) => ({ label: `任务 #${itemIndex + 1}`, value: itemIndex }));
 }
 
 async function loadTaskViews(serverId: number, index: number) {
@@ -648,16 +648,6 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
-}
-
-.dependency-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 14px;
-  color: var(--text-muted);
-  font-size: 12.5px;
-  font-weight: 500;
 }
 
 .key-grid {
