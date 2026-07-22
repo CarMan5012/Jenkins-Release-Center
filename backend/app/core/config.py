@@ -88,7 +88,7 @@ class Settings(BaseSettings):
         else:
             self.ACCESS_TOKEN_EXPIRE_MINUTES = 8 * 60 # 8 hours
             
-        def load_secret_from_file(file_path: str, default_val: str, name: str) -> str:
+        def load_secret_from_file(file_path: str, configured_value: str, default_val: str, name: str) -> str:
             if file_path and os.path.exists(file_path):
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
@@ -99,17 +99,20 @@ class Settings(BaseSettings):
                     if not is_dev:
                         raise RuntimeError(f"生产启动失败：读取密钥文件 [{name}] ({file_path}) 失败: {str(e)}")
             
+            configured_value = (configured_value or "").strip()
+            if configured_value:
+                return configured_value
+
             if is_dev:
-                warnings.warn(f"[{name}] 密钥文件不存在或为空，在开发环境下回退到默认值。")
+                warnings.warn(f"[{name}] 密钥文件和环境变量均为空，在开发环境下回退到默认值。")
                 return default_val
-            else:
-                raise RuntimeError(f"生产启动失败：必要密钥文件 [{name}] ({file_path}) 缺失或为空")
+            raise RuntimeError(f"生产启动失败：必要密钥 [{name}] 的文件 ({file_path}) 和环境变量均缺失或为空")
                 
-        # Load sequentially
-        self.SECRET_KEY = load_secret_from_file(self.SECRET_KEY_FILE, default_secret_key, "SECRET_KEY")
-        self.AES_SECRET_KEY = load_secret_from_file(self.AES_SECRET_KEY_FILE, default_aes_secret_key, "AES_SECRET_KEY")
-        self.BACKUP_ENCRYPTION_KEY = load_secret_from_file(self.BACKUP_ENCRYPTION_KEY_FILE, default_backup_key, "BACKUP_ENCRYPTION_KEY")
-        self.INITIAL_ADMIN_PASSWORD = load_secret_from_file(self.INITIAL_ADMIN_PASSWORD_FILE, default_admin_password, "INITIAL_ADMIN_PASSWORD")
+        # Secret priority: mounted file, environment/config value, development default.
+        self.SECRET_KEY = load_secret_from_file(self.SECRET_KEY_FILE, self.SECRET_KEY, default_secret_key, "SECRET_KEY")
+        self.AES_SECRET_KEY = load_secret_from_file(self.AES_SECRET_KEY_FILE, self.AES_SECRET_KEY, default_aes_secret_key, "AES_SECRET_KEY")
+        self.BACKUP_ENCRYPTION_KEY = load_secret_from_file(self.BACKUP_ENCRYPTION_KEY_FILE, self.BACKUP_ENCRYPTION_KEY, default_backup_key, "BACKUP_ENCRYPTION_KEY")
+        self.INITIAL_ADMIN_PASSWORD = load_secret_from_file(self.INITIAL_ADMIN_PASSWORD_FILE, self.INITIAL_ADMIN_PASSWORD, default_admin_password, "INITIAL_ADMIN_PASSWORD")
         
         # Perform production-only safety checks
         if not is_dev:
