@@ -103,6 +103,11 @@
                   <template #suffix>天</template>
                 </n-input-number>
               </n-form-item>
+              <n-form-item label="计划列表保留" feedback="只清理已结束计划；等待中和运行中计划不会删除。设为 0 则永久保留。">
+                <n-input-number v-model:value="planRetention" :min="0" placeholder="默认 30 天，0 表示永久">
+                  <template #suffix>天</template>
+                </n-input-number>
+              </n-form-item>
               <div style="margin-top: 32px; display: flex; justify-content: flex-end;">
                 <n-button type="primary" :loading="submitRetentionLoading" @click="submitRetentionPolicy">
                   保存策略
@@ -400,6 +405,7 @@ function deleteNotify(item: NotifyConfig) {
 
 const auditRetention = ref<number | null>(30);
 const historyRetention = ref<number | null>(30);
+const planRetention = ref<number | null>(30);
 const submitRetentionLoading = ref(false);
 
 async function loadSystemConfigs() {
@@ -420,6 +426,9 @@ async function loadSystemConfigs() {
     } else {
       historyRetention.value = 0;
     }
+
+    const planDays = configs.find((c: any) => c.config_key === 'plan_retention_days');
+    planRetention.value = planDays ? parseInt(planDays.config_value) : 30;
   } catch (err: any) {
     message.error(err.message || '加载系统配置失败');
   }
@@ -438,6 +447,11 @@ async function submitRetentionPolicy() {
         config_key: 'history_retention_days',
         config_value: String(historyRetention.value || 0),
         description: '执行历史与日志保留天数 (天，0表示永久保留)'
+      }),
+      request.post('/system/configs', {
+        config_key: 'plan_retention_days',
+        config_value: String(planRetention.value ?? 30),
+        description: '计划列表保留天数 (天，0表示永久保留)'
       })
     ]);
     message.success('数据保留策略保存成功');

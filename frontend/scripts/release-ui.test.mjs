@@ -11,9 +11,13 @@ assert.ok(source, 'release-ui helper exists');
 
 const releaseViewSource = fs.readFileSync(new URL('../src/views/release/index.vue', import.meta.url), 'utf8');
 const dashboardSource = fs.readFileSync(new URL('../src/views/dashboard/index.vue', import.meta.url), 'utf8');
+const configSource = fs.readFileSync(new URL('../src/views/config/index.vue', import.meta.url), 'utf8');
 
 assert.match(releaseViewSource, /const wizardForm = ref\(\{\s*name: '',\s*type: 'SCHEDULED'/);
 assert.match(releaseViewSource, /function openCreateWizard\(\)[\s\S]*?wizardForm\.value = \{\s*name: '',\s*type: 'SCHEDULED'/);
+assert.match(configSource, /v-model:value="planRetention"/);
+assert.match(configSource, /config_key: 'plan_retention_days'/);
+assert.match(configSource, /const planRetention = ref<number \| null>\(30\)/);
 
 for (const viewSource of [releaseViewSource, dashboardSource]) {
   assert.match(viewSource, /depends_on_sequence: .*PIPELINE.*index > 0.*index - 1.*null/);
