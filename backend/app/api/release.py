@@ -219,28 +219,27 @@ def create_plan(
                 background_tasks.add_task(execute_release_task, plan.id, t.id)
                 
     else: # SCHEDULED, BATCH, PIPELINE (Scheduled)
-        # Calculate dynamic triggers for each task
+        # Persist every calculated time together before touching the external scheduler.
         for t in plan.tasks:
-            # Calculate execution delay if BATCH
             task_time = plan.execute_time
             if plan.type == "BATCH" and plan.interval_minutes > 0:
                 task_time = plan.execute_time + timedelta(minutes=plan.interval_minutes * t.sequence)
-                
             t.scheduled_time = task_time
-            db.commit()
-            
-            # If PIPELINE scheduled, only register the first task (seq 0) on scheduler
-            # Subsequent tasks are auto-triggered upon preceding SUCCESS.
-            if plan.type == "PIPELINE":
-                if t.sequence == 0:
-                    scheduler_manager.add_release_job(
-                        plan.id, t.id, task_time, execute_release_task, plan.id, t.id
-                    )
-            else:
-                # Register all tasks for Scheduled / Batch models
+        db.commit()
+
+        try:
+            for t in plan.tasks:
+                if plan.type == "PIPELINE" and t.sequence != 0:
+                    continue
                 scheduler_manager.add_release_job(
-                    plan.id, t.id, task_time, execute_release_task, plan.id, t.id
+                    plan.id, t.id, t.scheduled_time, execute_release_task, plan.id, t.id
                 )
+        except Exception as error:
+            for t in plan.tasks:
+                scheduler_manager.remove_release_job(plan.id, t.id)
+            db.delete(plan)
+            db.commit()
+            raise HTTPException(status_code=503, detail=f"注册发布排程失败: {error}")
                 
     log_action(db, current_user, "CREATE_RELEASE_PLAN", get_client_ip(request), f"Created release plan: {plan.name}")
     return plan
@@ -476,26 +475,52 @@ def update_plan(
         db.flush()
         
     # 8. Re-register Scheduler
-    if plan.type != "IMMEDIATE":
-        from app.services.release_service import execute_release_task
-        for t in new_tasks:
-            task_time = plan.execute_time
-            if plan.type == "BATCH" and plan.interval_minutes > 0:
-                task_time = plan.execute_time + timedelta(minutes=plan.interval_minutes * t.sequence)
-                
-            t.scheduled_time = task_time
-            
-            if plan.type == "PIPELINE":
-                if t.sequence == 0:
-                    scheduler_manager.add_release_job(
-                        plan.id, t.id, task_time, execute_release_task, plan.id, t.id
-                    )
-            else:
+    try:
+        if plan.type != "IMMEDIATE":
+            for t in new_tasks:
+                task_time = plan.execute_time
+                if plan.type == "BATCH" and plan.interval_minutes > 0:
+                    task_time = plan.execute_time + timedelta(minutes=plan.interval_minutes * t.sequence)
+
+                t.scheduled_time = task_time
+                if plan.type == "PIPELINE" and t.sequence != 0:
+                    continue
                 scheduler_manager.add_release_job(
                     plan.id, t.id, task_time, execute_release_task, plan.id, t.id
                 )
-                
-    db.commit()
+
+        db.commit()
+    except Exception as error:
+        for t in new_tasks:
+            scheduler_manager.remove_release_job(plan_id, t.id)
+        db.rollback()
+
+        restored_plan = db.execute(
+            select(ReleasePlan).filter(ReleasePlan.id == plan_id).options(
+                selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
+            )
+        ).scalars().first()
+        restoration_error = None
+        try:
+            if restored_plan and restored_plan.type != "IMMEDIATE":
+                for old_task in restored_plan.tasks:
+                    if restored_plan.type == "PIPELINE" and old_task.sequence != 0:
+                        continue
+                    scheduler_manager.add_release_job(
+                        restored_plan.id,
+                        old_task.id,
+                        old_task.scheduled_time,
+                        execute_release_task,
+                        restored_plan.id,
+                        old_task.id,
+                    )
+        except Exception as restore_error:
+            restoration_error = restore_error
+
+        detail = f"更新发布排程失败，已回滚数据库: {error}"
+        if restoration_error:
+            detail += f"；恢复原排程失败: {restoration_error}"
+        raise HTTPException(status_code=503, detail=detail)
     
     # Refetch to return loaded response
     stmt = select(ReleasePlan).filter(ReleasePlan.id == plan_id).options(
