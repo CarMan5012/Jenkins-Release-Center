@@ -59,6 +59,21 @@ def test_jenkins_stop_build_posts_to_stop_endpoint(mock_post):
         allow_redirects=False,
     )
 
+@patch('requests.Session.get')
+def test_recent_builds_request_branch_parameters(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"builds": []}
+    mock_get.return_value = mock_response
+
+    client = JenkinsClient("http://localhost:8080", "admin", "token123")
+    client.get_recent_builds("folder/frontend-deploy")
+
+    requested_url = mock_get.call_args.args[0]
+    assert "parameters[name,value]" in requested_url
+
+
+
 def test_read_backup_details_returns_structured_json(tmp_path):
     archive_path = tmp_path / "backup.zip"
     expected = {

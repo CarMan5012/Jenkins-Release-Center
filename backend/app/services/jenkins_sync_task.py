@@ -87,7 +87,7 @@ def sync_external_builds():
                             parameters = action.get("parameters", []) or []
                             for param in parameters:
                                 p_name = param.get("name", "").lower()
-                                if p_name in ["branch", "tag", "git_branch", "gitparameter"]:
+                                if p_name in ["branch", "branch_name", "tag", "git_branch", "gitparameter"]:
                                     branch = str(param.get("value", ""))
                                     
                         # Fetch console logs

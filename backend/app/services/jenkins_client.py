@@ -360,7 +360,7 @@ class JenkinsClient:
         try:
             job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
             # Use Jenkins API slicing feature to retrieve only the last N builds
-            url = urljoin(self.base_url, f"{job_path}/api/json?tree=builds[number,result,timestamp,duration,building,actions[causes[userName,shortDescription]]]{{0,{limit}}}")
+            url = urljoin(self.base_url, f"{job_path}/api/json?tree=builds[number,result,timestamp,duration,building,actions[causes[userName,shortDescription],parameters[name,value]]]{{0,{limit}}}")
             response = self.session.get(url, timeout=10)
             if response.status_code == 200:
                 return response.json().get("builds", [])

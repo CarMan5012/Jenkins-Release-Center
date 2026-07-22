@@ -60,6 +60,9 @@ def test_sync_external_builds_success(mock_client_class, mock_session_local):
                 {
                     "causes": [
                         {"userName": "ManualOperator"}
+                    ],
+                    "parameters": [
+                        {"name": "BRANCH_NAME", "value": "release/2026.07"}
                     ]
                 }
             ]
@@ -82,6 +85,7 @@ def test_sync_external_builds_success(mock_client_class, mock_session_local):
     assert record.plan_id is None
     assert record.server_name == "test-server"
     assert record.job_name == "frontend-build"
+    assert record.branch == "release/2026.07"
     assert record.build_number == 42
     assert record.status == "SUCCESS"
     assert record.trigger_by == "ManualOperator"
