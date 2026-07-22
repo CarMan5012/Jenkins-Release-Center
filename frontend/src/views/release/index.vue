@@ -241,7 +241,7 @@ const taskBranchOptions = ref<Record<number, SelectOption[]>>({});
 
 const wizardForm = ref({
   name: '',
-  type: 'IMMEDIATE',
+  type: 'SCHEDULED',
   execute_time: null as number | null,
   interval_minutes: 2,
   pipeline_strategy: 'STOP',
@@ -414,7 +414,7 @@ function openCreateWizard() {
   taskBranchOptions.value = {};
   wizardForm.value = {
     name: '',
-    type: 'IMMEDIATE',
+    type: 'SCHEDULED',
     execute_time: null,
     interval_minutes: 2,
     pipeline_strategy: 'STOP',

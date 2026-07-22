@@ -12,6 +12,9 @@ assert.ok(source, 'release-ui helper exists');
 const releaseViewSource = fs.readFileSync(new URL('../src/views/release/index.vue', import.meta.url), 'utf8');
 const dashboardSource = fs.readFileSync(new URL('../src/views/dashboard/index.vue', import.meta.url), 'utf8');
 
+assert.match(releaseViewSource, /const wizardForm = ref\(\{\s*name: '',\s*type: 'SCHEDULED'/);
+assert.match(releaseViewSource, /function openCreateWizard\(\)[\s\S]*?wizardForm\.value = \{\s*name: '',\s*type: 'SCHEDULED'/);
+
 for (const viewSource of [releaseViewSource, dashboardSource]) {
   assert.match(viewSource, /depends_on_sequence: .*PIPELINE.*index > 0.*index - 1.*null/);
   assert.match(viewSource, /retryType = plan\.type === 'PIPELINE' \? 'PIPELINE' : 'IMMEDIATE'/);
