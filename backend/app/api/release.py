@@ -242,7 +242,20 @@ def create_plan(
             db.commit()
             raise HTTPException(status_code=503, detail=f"注册发布排程失败: {error}")
                 
-    plan = run_release_preflight(db, plan)
+    if plan.type == "IMMEDIATE":
+        try:
+            plan = run_release_preflight(db, plan)
+        except Exception:
+            plan.status = "FAILED"
+            for task in plan.tasks:
+                if task.status == "WAITING":
+                    task.status = "FAILED"
+                    task.error_message = "发布前检查异常"
+                    task.finished_at = datetime.now()
+            db.commit()
+            raise
+    else:
+        plan = run_release_preflight(db, plan)
     log_action(db, current_user, "CREATE_RELEASE_PLAN", get_client_ip(request), f"Created release plan: {plan.name}")
     return plan
 

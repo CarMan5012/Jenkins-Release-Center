@@ -264,6 +264,41 @@ def test_create_runs_preflight_after_plan_and_tasks_are_persisted(db):
     assert result.preflight_status == "PASSED"
 
 
+def test_immediate_create_persists_failure_when_preflight_crashes(db):
+    existing, server = persist_plan(db)
+    job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
+    plan_in = ReleasePlanCreate(
+        name="crashing immediate",
+        type="IMMEDIATE",
+        tasks=[ReleaseTaskCreate(
+            server_id=server.id,
+            job_id=job.id,
+            job_name=job.name,
+            branch="main",
+        )],
+    )
+
+    with (
+        patch.object(release_api, "validate_release_plan_input"),
+        patch.object(
+            release_api,
+            "run_release_preflight",
+            side_effect=RuntimeError("secret-token"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="secret-token"):
+            release_api.create_plan(
+                api_request(), plan_in, BackgroundTasks(), db, existing.creator
+            )
+
+    plan = db.query(ReleasePlan).filter_by(name=plan_in.name).one()
+    assert plan.status == "FAILED"
+    assert all(task.status == "FAILED" for task in plan.tasks)
+    assert all(task.finished_at is not None for task in plan.tasks)
+    assert all(task.error_message == "发布前检查异常" for task in plan.tasks)
+    assert "secret-token" not in plan.tasks[0].error_message
+
+
 def test_update_resets_and_runs_preflight_after_scheduler_success(db):
     plan, server = persist_plan(db)
     user = plan.creator
