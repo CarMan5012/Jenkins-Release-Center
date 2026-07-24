@@ -59,7 +59,15 @@
                   <span class="muted mono">#{{ plan.id }} · {{ formatPlanType(plan.type) }} · {{ plan.tasks?.length || 0 }} tasks</span>
                 </RouterLink>
               </td>
-              <td><StatusBadge :status="plan.status" /></td>
+              <td>
+                <div class="cell-title">
+                  <StatusBadge :status="plan.status" />
+                  <span>
+                    <n-tag size="small" :type="preflightTagType(plan.preflight_status)">{{ getPreflightMeta(plan.preflight_status).label }}</n-tag>
+                    <span class="muted mono"> {{ formatDateTime(plan.preflight_checked_at) }}</span>
+                  </span>
+                </div>
+              </td>
               <td class="mono">{{ formatDateTime(plan.execute_time || plan.created_at) }}</td>
               <td class="mono">{{ getWeekDay(plan.execute_time || plan.created_at) }}</td>
               <td class="mono">{{ formatDuration(getPlanDurationSeconds(plan)) }}</td>
@@ -71,7 +79,7 @@
               </td>
               <td>
                 <div class="cell-actions">
-                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status !== 'WAITING'" @click="triggerPlan(plan)">运行</n-button>
+                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status !== 'WAITING' || isPreflightBlocked(plan.preflight_status)" :title="isPreflightBlocked(plan.preflight_status) ? '请先完成并通过发布前检查' : undefined" @click="triggerPlan(plan)">运行</n-button>
                   <n-button size="tiny" type="warning" secondary :loading="busyKey === `stop-${plan.id}`" :disabled="!['WAITING', 'RUNNING'].includes(plan.status)" @click="cancelPlan(plan)">停止</n-button>
                   <n-button size="tiny" secondary :loading="busyKey === `retry-${plan.id}`" :disabled="['WAITING', 'RUNNING'].includes(plan.status)" @click="retryPlan(plan)">重试</n-button>
                   <n-button size="tiny" secondary :disabled="plan.status !== 'WAITING'" @click="editPlan(plan)">编辑</n-button>
@@ -136,7 +144,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { NAlert, NButton, NInput, NModal, NSelect, NSkeleton, useDialog, useMessage } from 'naive-ui';
+import { NAlert, NButton, NInput, NModal, NSelect, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui';
 import LogViewer from '../../components/LogViewer.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
@@ -146,10 +154,13 @@ import {
   formatDateTime,
   formatDuration,
   formatPlanType,
+  getPreflightMeta,
   getPlanDurationSeconds,
+  isPreflightBlocked,
   sortPlans,
   getWeekDay,
 } from '../../utils/release-ui';
+import type { PreflightStatus } from '../../utils/release-ui';
 
 interface ReleaseTask {
   id: number;
@@ -176,6 +187,17 @@ interface ReleasePlan {
   status: string;
   creator_id: number;
   created_at: string;
+  preflight_status: PreflightStatus;
+  preflight_checked_at?: string | null;
+  preflight_result?: {
+    summary?: string;
+    tasks?: Array<{
+      task_id: number;
+      job_name: string;
+      status: PreflightStatus;
+      checks: Array<{ code: string; status: PreflightStatus; message: string }>;
+    }>;
+  } | null;
   tasks: ReleaseTask[];
 }
 
@@ -250,6 +272,12 @@ const metrics = computed(() => [
   { label: '最近执行', value: latestRun.value, note: '按历史记录排序' },
 ]);
 
+function preflightTagType(status: PreflightStatus): 'default' | 'success' | 'warning' | 'error' {
+  const tone = getPreflightMeta(status).tone;
+  if (tone === 'success' || tone === 'warning') return tone;
+  return tone === 'danger' ? 'error' : 'default';
+}
+
 async function loadDashboard(trigger?: 'page' | 'refresh' | 'list' | 'poll') {
   if (trigger === 'refresh') {
     btnRefreshLoading.value = true;
@@ -298,10 +326,25 @@ async function runAction(key: string, action: () => Promise<void>) {
 }
 
 function triggerPlan(plan: ReleasePlan) {
-  runAction(`run-${plan.id}`, async () => {
+  if (isPreflightBlocked(plan.preflight_status)) {
+    message.warning('请先完成并通过发布前检查。');
+    return;
+  }
+  const execute = () => runAction(`run-${plan.id}`, async () => {
     await request.post(`/release/plans/${plan.id}/trigger`);
     message.success('已触发执行。');
   });
+  if (plan.preflight_status === 'WARNING') {
+    dialog.warning({
+      title: '预检存在警告',
+      content: '最近一次检查存在临时性问题，仍要运行吗？',
+      positiveText: '仍然运行',
+      negativeText: '取消',
+      onPositiveClick: execute,
+    });
+    return;
+  }
+  execute();
 }
 
 function cancelPlan(plan: ReleasePlan) {
@@ -341,6 +384,23 @@ function retryPlan(plan: ReleasePlan) {
       })),
     });
     if (retryType === 'PIPELINE') {
+      if (isPreflightBlocked(response.data.preflight_status)) {
+        message.error('重试计划已创建，但发布前检查未通过。');
+        return;
+      }
+      if (response.data.preflight_status === 'WARNING') {
+        dialog.warning({
+          title: '预检存在警告',
+          content: '重试计划已创建，最近一次检查存在临时性问题，仍要运行吗？',
+          positiveText: '仍然运行',
+          negativeText: '取消',
+          onPositiveClick: () => runAction(`retry-${response.data.id}`, async () => {
+            await request.post(`/release/plans/${response.data.id}/trigger`);
+            message.success('已触发重试任务。');
+          }),
+        });
+        return;
+      }
       await request.post(`/release/plans/${response.data.id}/trigger`);
     }
     message.success('已创建重试任务。');

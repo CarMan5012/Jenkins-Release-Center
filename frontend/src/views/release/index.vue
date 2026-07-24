@@ -35,6 +35,7 @@
             <tr>
               <th scope="col">名称</th>
               <th scope="col">状态</th>
+              <th scope="col">预检状态</th>
               <th scope="col">类型</th>
               <th scope="col">调度时间</th>
               <th scope="col">星期</th>
@@ -51,13 +52,20 @@
                 </RouterLink>
               </td>
               <td><StatusBadge :status="plan.status" /></td>
+              <td>
+                <div class="cell-title">
+                  <n-tag size="small" :type="preflightTagType(plan.preflight_status)">{{ getPreflightMeta(plan.preflight_status).label }}</n-tag>
+                  <span class="muted mono">{{ formatDateTime(plan.preflight_checked_at) }}</span>
+                </div>
+              </td>
               <td>{{ formatPlanType(plan.type) }}</td>
               <td class="mono">{{ formatDateTime(plan.execute_time) }}</td>
               <td class="mono">{{ getWeekDay(plan.execute_time) }}</td>
               <td class="mono">{{ plan.tasks?.length || 0 }}</td>
               <td>
                 <div class="cell-actions">
-                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status !== 'WAITING'" @click="triggerPlan(plan)">运行</n-button>
+                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status !== 'WAITING' || isPreflightBlocked(plan.preflight_status)" :title="isPreflightBlocked(plan.preflight_status) ? '请先完成并通过发布前检查' : undefined" @click="triggerPlan(plan)">运行</n-button>
+                  <n-button size="tiny" secondary :loading="busyKey === `preflight-${plan.id}`" @click="preflightPlan(plan)">发布前检查</n-button>
                   <n-button size="tiny" type="warning" secondary :loading="busyKey === `cancel-${plan.id}`" :disabled="!['WAITING', 'RUNNING'].includes(plan.status)" @click="cancelPlan(plan)">停止</n-button>
                   <n-button size="tiny" secondary :loading="busyKey === `retry-${plan.id}`" :disabled="['WAITING', 'RUNNING'].includes(plan.status)" @click="retryPlan(plan)">重试</n-button>
                   <n-button size="tiny" secondary :disabled="plan.status !== 'WAITING'" @click="openEditWizard(plan)">编辑</n-button>
@@ -67,7 +75,7 @@
               </td>
             </tr>
             <tr v-if="!visiblePlans.length">
-              <td colspan="7"><div class="empty-inline">没有发布计划。</div></td>
+              <td colspan="8"><div class="empty-inline">没有发布计划。</div></td>
             </tr>
           </tbody>
         </table>
@@ -159,6 +167,10 @@
         </div>
       </template>
     </n-modal>
+
+    <n-modal v-model:show="showPreflight" preset="card" :title="`${selectedPreflight?.name || '发布计划'} · 发布前检查`" style="width: min(760px, 94vw)">
+      <PreflightResult :result="selectedPreflight?.preflight_result" :checked-at="selectedPreflight?.preflight_checked_at" />
+    </n-modal>
   </section>
 </template>
 
@@ -178,13 +190,16 @@ import {
   NSkeleton,
   NStep,
   NSteps,
+  NTag,
   useDialog,
   useMessage,
 } from 'naive-ui';
+import PreflightResult from '../../components/PreflightResult.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
 import request from '../../utils/request';
-import { filterPlans, formatDateTime, formatPlanType, sortPlans, getWeekDay } from '../../utils/release-ui';
+import { filterPlans, formatDateTime, formatPlanType, getPreflightMeta, isPreflightBlocked, sortPlans, getWeekDay } from '../../utils/release-ui';
+import type { PreflightStatus } from '../../utils/release-ui';
 
 type SelectOption = { label: string; value: number | string };
 
@@ -211,6 +226,17 @@ interface ReleasePlan {
   status: string;
   creator_id: number;
   created_at: string;
+  preflight_status: PreflightStatus;
+  preflight_checked_at?: string | null;
+  preflight_result?: {
+    summary?: string;
+    tasks?: Array<{
+      task_id: number;
+      job_name: string;
+      status: PreflightStatus;
+      checks: Array<{ code: string; status: PreflightStatus; message: string }>;
+    }>;
+  } | null;
   tasks: ReleaseTask[];
 }
 
@@ -229,6 +255,8 @@ const keyword = ref('');
 const statusFilter = ref('ALL');
 const typeFilter = ref('ALL');
 const sortKey = ref('created_desc');
+const showPreflight = ref(false);
+const selectedPreflight = ref<ReleasePlan | null>(null);
 
 const showWizard = ref(false);
 const wizardMode = ref<'create' | 'edit'>('create');
@@ -279,6 +307,12 @@ const strategyOptions = [
 
 const serverOptions = computed<SelectOption[]>(() => servers.value.map((server) => ({ label: server.name, value: server.id })));
 const visiblePlans = computed(() => sortPlans(filterPlans(plans.value, keyword.value, statusFilter.value, typeFilter.value), sortKey.value));
+
+function preflightTagType(status: PreflightStatus): 'default' | 'success' | 'warning' | 'error' {
+  const tone = getPreflightMeta(status).tone;
+  if (tone === 'success' || tone === 'warning') return tone;
+  return tone === 'danger' ? 'error' : 'default';
+}
 
 function emptyTask(): ReleaseTask {
   return {
@@ -335,10 +369,39 @@ async function runAction(key: string, action: () => Promise<void>) {
 }
 
 function triggerPlan(plan: ReleasePlan) {
-  runAction(`run-${plan.id}`, async () => {
+  if (isPreflightBlocked(plan.preflight_status)) {
+    message.warning('请先完成并通过发布前检查。');
+    return;
+  }
+  const execute = () => runAction(`run-${plan.id}`, async () => {
     await request.post(`/release/plans/${plan.id}/trigger`);
     message.success('已触发执行。');
   });
+  if (plan.preflight_status === 'WARNING') {
+    dialog.warning({
+      title: '预检存在警告',
+      content: '最近一次检查存在临时性问题，仍要运行吗？',
+      positiveText: '仍然运行',
+      negativeText: '取消',
+      onPositiveClick: execute,
+    });
+    return;
+  }
+  execute();
+}
+
+async function preflightPlan(plan: ReleasePlan) {
+  busyKey.value = `preflight-${plan.id}`;
+  try {
+    const response = await request.post(`/release/plans/${plan.id}/preflight`);
+    selectedPreflight.value = response.data;
+    showPreflight.value = true;
+    await loadPlans();
+  } catch (err: any) {
+    message.error(err.message || '发布前检查失败。');
+  } finally {
+    busyKey.value = '';
+  }
 }
 
 function cancelPlan(plan: ReleasePlan) {
@@ -380,6 +443,23 @@ function retryPlan(plan: ReleasePlan) {
     }
     const response = await request.post('/release/plans', payload);
     if (retryType === 'PIPELINE') {
+      if (isPreflightBlocked(response.data.preflight_status)) {
+        message.error('重试计划已创建，但发布前检查未通过。');
+        return;
+      }
+      if (response.data.preflight_status === 'WARNING') {
+        dialog.warning({
+          title: '预检存在警告',
+          content: '重试计划已创建，最近一次检查存在临时性问题，仍要运行吗？',
+          positiveText: '仍然运行',
+          negativeText: '取消',
+          onPositiveClick: () => runAction(`retry-${response.data.id}`, async () => {
+            await request.post(`/release/plans/${response.data.id}/trigger`);
+            message.success('已触发重试任务。');
+          }),
+        });
+        return;
+      }
       await request.post(`/release/plans/${response.data.id}/trigger`);
     }
     message.success('已创建重试任务。');
@@ -565,19 +645,23 @@ async function submitPlan() {
     status: 'WAITING',
     creator_id: 0,
     created_at: new Date().toISOString(),
+    preflight_status: 'UNCHECKED',
+    preflight_checked_at: null,
+    preflight_result: null,
     tasks: wizardForm.value.tasks,
   };
   submitLoading.value = true;
   try {
     const payload = buildPayload(fakePlan);
-    if (wizardMode.value === 'edit' && editingPlanId.value) {
-      await request.put(`/release/plans/${editingPlanId.value}`, payload);
-      message.success('发布计划已更新。');
-    } else {
-      await request.post('/release/plans', payload);
-      message.success('发布计划已创建。');
-    }
+    const response = wizardMode.value === 'edit' && editingPlanId.value
+      ? await request.put(`/release/plans/${editingPlanId.value}`, payload)
+      : await request.post('/release/plans', payload);
+    message.success(wizardMode.value === 'edit' ? '发布计划已更新。' : '发布计划已创建。');
     showWizard.value = false;
+    if (response.data.preflight_status === 'FAILED') {
+      selectedPreflight.value = response.data;
+      showPreflight.value = true;
+    }
     await loadPlans();
   } catch (err: any) {
     message.error(err.message || '提交失败。');

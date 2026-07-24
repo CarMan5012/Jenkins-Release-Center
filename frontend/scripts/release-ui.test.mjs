@@ -10,7 +10,9 @@ const source = fs.existsSync(sourcePath) ? fs.readFileSync(sourcePath, 'utf8') :
 assert.ok(source, 'release-ui helper exists');
 
 const releaseViewSource = fs.readFileSync(new URL('../src/views/release/index.vue', import.meta.url), 'utf8');
+const detailSource = fs.readFileSync(new URL('../src/views/release/detail.vue', import.meta.url), 'utf8');
 const dashboardSource = fs.readFileSync(new URL('../src/views/dashboard/index.vue', import.meta.url), 'utf8');
+const jenkinsSource = fs.readFileSync(new URL('../src/views/jenkins/index.vue', import.meta.url), 'utf8');
 const configSource = fs.readFileSync(new URL('../src/views/config/index.vue', import.meta.url), 'utf8');
 
 assert.match(releaseViewSource, /const wizardForm = ref\(\{\s*name: '',\s*type: 'SCHEDULED'/);
@@ -25,6 +27,16 @@ for (const viewSource of [releaseViewSource, dashboardSource]) {
   assert.match(viewSource, /\/release\/plans\/\$\{response\.data\.id\}\/trigger/);
 }
 assert.doesNotMatch(releaseViewSource, /getDependencyOptions/);
+
+assert.match(releaseViewSource, /\/release\/plans\/\$\{plan\.id\}\/preflight/);
+assert.match(detailSource, /\/release\/plans\/\$\{plan\.value\?\.id\}\/preflight/);
+for (const viewSource of [releaseViewSource, detailSource, dashboardSource]) {
+  assert.match(viewSource, /isPreflightBlocked\([\s\S]*?preflight_status\)/);
+  assert.match(viewSource, /preflight_status/);
+}
+assert.match(releaseViewSource, /<PreflightResult/);
+assert.match(detailSource, /<PreflightResult/);
+assert.match(jenkinsSource, /response\.data\.preflight_status/);
 
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: {

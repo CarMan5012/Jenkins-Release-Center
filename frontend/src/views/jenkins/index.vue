@@ -171,7 +171,7 @@ import StatusBadge from '../../components/StatusBadge.vue';
 import BackupDrawer from './BackupDrawer.vue';
 import request from '../../utils/request';
 import { encryptData } from '../../utils/crypto';
-import { formatDateTime } from '../../utils/release-ui';
+import { formatDateTime, isPreflightBlocked } from '../../utils/release-ui';
 
 interface JenkinsServer {
   id: number;
@@ -482,7 +482,7 @@ async function submitQuickRun() {
   }
   submitLoading.value = true;
   try {
-    await request.post('/release/plans', {
+    const response = await request.post('/release/plans', {
       name: `Run ${activeJob.value.name}`,
       type: 'IMMEDIATE',
       execute_time: null,
@@ -497,6 +497,15 @@ async function submitQuickRun() {
         depends_on_sequence: null,
       }],
     });
+    const status = response.data.preflight_status;
+    if (isPreflightBlocked(status)) {
+      message.error('计划已创建，但发布前检查未通过，请到发布计划页面处理');
+      return;
+    }
+    if (status === 'WARNING') {
+      message.warning('计划已创建，预检存在警告，请到发布计划页面确认后运行');
+      return;
+    }
     message.success('已创建立即执行任务。');
     runModalVisible.value = false;
     router.push('/release');

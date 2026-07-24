@@ -7,7 +7,8 @@
       </div>
       <div class="header-actions">
         <n-button secondary @click="router.push('/release')">返回列表</n-button>
-        <n-button type="primary" :disabled="plan?.status !== 'WAITING'" :loading="busyKey === 'run'" @click="triggerPlan">运行</n-button>
+        <n-button secondary :disabled="!plan" :loading="busyKey === 'preflight'" @click="preflightPlan">发布前检查</n-button>
+        <n-button type="primary" :disabled="plan?.status !== 'WAITING' || isPreflightBlocked(plan?.preflight_status)" :title="isPreflightBlocked(plan?.preflight_status) ? '请先完成并通过发布前检查' : undefined" :loading="busyKey === 'run'" @click="triggerPlan">运行</n-button>
         <n-button type="warning" secondary :disabled="!plan || !['WAITING', 'RUNNING'].includes(plan.status)" :loading="busyKey === 'stop'" @click="cancelPlan">停止</n-button>
       </div>
     </div>
@@ -42,7 +43,14 @@
           <span class="summary-label">计划时间</span>
           <strong class="mono">{{ formatDateTime(plan.execute_time || plan.created_at) }}</strong>
         </div>
+        <div>
+          <span class="summary-label">预检状态</span>
+          <n-tag size="small" :type="preflightTagType(plan.preflight_status)">{{ getPreflightMeta(plan.preflight_status).label }}</n-tag>
+          <span class="muted mono">{{ formatDateTime(plan.preflight_checked_at) }}</span>
+        </div>
       </div>
+
+      <PreflightResult :result="plan.preflight_result" :checked-at="plan.preflight_checked_at" />
 
       <n-tabs v-model:value="activeTab" type="segment" animated>
         <n-tab-pane name="overview" tab="概览">
@@ -203,12 +211,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { NAlert, NButton, NSelect, NSkeleton, NTabPane, NTabs, NTimeline, NTimelineItem, useDialog, useMessage } from 'naive-ui';
+import { NAlert, NButton, NSelect, NSkeleton, NTabPane, NTabs, NTag, NTimeline, NTimelineItem, useDialog, useMessage } from 'naive-ui';
 import LogViewer from '../../components/LogViewer.vue';
+import PreflightResult from '../../components/PreflightResult.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
 import request from '../../utils/request';
-import { formatDateTime, formatDuration, formatPlanType, getPlanDurationSeconds, formatTriggerBy } from '../../utils/release-ui';
+import { formatDateTime, formatDuration, formatPlanType, getPlanDurationSeconds, formatTriggerBy, getPreflightMeta, isPreflightBlocked } from '../../utils/release-ui';
+import type { PreflightStatus } from '../../utils/release-ui';
 
 interface ReleaseTask {
   id: number;
@@ -238,6 +248,17 @@ interface ReleasePlan {
   creator_id: number;
   created_at: string;
   updated_at: string;
+  preflight_status: PreflightStatus;
+  preflight_checked_at?: string | null;
+  preflight_result?: {
+    summary?: string;
+    tasks?: Array<{
+      task_id: number;
+      job_name: string;
+      status: PreflightStatus;
+      checks: Array<{ code: string; status: PreflightStatus; message: string }>;
+    }>;
+  } | null;
   tasks: ReleaseTask[];
 }
 
@@ -304,6 +325,12 @@ const selectedLogBuildNumber = computed(() => {
   return selectedTask.value?.build_number || null;
 });
 
+function preflightTagType(status: PreflightStatus): 'default' | 'success' | 'warning' | 'error' {
+  const tone = getPreflightMeta(status).tone;
+  if (tone === 'success' || tone === 'warning') return tone;
+  return tone === 'danger' ? 'error' : 'default';
+}
+
 async function loadPlan() {
   loading.value = true;
   error.value = '';
@@ -369,10 +396,39 @@ async function runAction(key: string, action: () => Promise<void>) {
 
 function triggerPlan() {
   if (!plan.value) return;
-  runAction('run', async () => {
+  if (isPreflightBlocked(plan.value.preflight_status)) {
+    message.warning('请先完成并通过发布前检查。');
+    return;
+  }
+  const execute = () => runAction('run', async () => {
     await request.post(`/release/plans/${plan.value?.id}/trigger`);
     message.success('已触发执行。');
   });
+  if (plan.value.preflight_status === 'WARNING') {
+    dialog.warning({
+      title: '预检存在警告',
+      content: '最近一次检查存在临时性问题，仍要运行吗？',
+      positiveText: '仍然运行',
+      negativeText: '取消',
+      onPositiveClick: execute,
+    });
+    return;
+  }
+  execute();
+}
+
+async function preflightPlan() {
+  if (!plan.value) return;
+  busyKey.value = 'preflight';
+  try {
+    const response = await request.post(`/release/plans/${plan.value?.id}/preflight`);
+    plan.value = response.data;
+    message.success('发布前检查已完成。');
+  } catch (err: any) {
+    message.error(err.message || '发布前检查失败。');
+  } finally {
+    busyKey.value = '';
+  }
 }
 
 function cancelPlan() {
@@ -416,7 +472,7 @@ onMounted(async () => {
 
 .detail-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .detail-summary > div {
