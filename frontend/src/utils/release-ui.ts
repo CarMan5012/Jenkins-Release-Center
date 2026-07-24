@@ -5,6 +5,8 @@ export type StatusMeta = {
   tone: StatusTone;
 };
 
+export type PreflightStatus = 'UNCHECKED' | 'PASSED' | 'WARNING' | 'FAILED';
+
 export type PlanLike = {
   name: string;
   status: string;
@@ -27,9 +29,24 @@ const STATUS_META: Record<string, StatusMeta> = {
   NOT_BUILT: { label: '未构建', tone: 'neutral' },
 };
 
+const PREFLIGHT_META: Record<PreflightStatus, StatusMeta> = {
+  UNCHECKED: { label: '未检查', tone: 'neutral' },
+  PASSED: { label: '通过', tone: 'success' },
+  WARNING: { label: '警告', tone: 'warning' },
+  FAILED: { label: '未通过', tone: 'danger' },
+};
+
 export function getStatusMeta(status?: string | null): StatusMeta {
   if (!status) return { label: '未知', tone: 'neutral' };
   return STATUS_META[status] || { label: status, tone: 'neutral' };
+}
+
+export function getPreflightMeta(status?: string | null): StatusMeta {
+  return PREFLIGHT_META[status as PreflightStatus] || PREFLIGHT_META.UNCHECKED;
+}
+
+export function isPreflightBlocked(status?: string | null): boolean {
+  return status !== 'PASSED' && status !== 'WARNING';
 }
 
 export function formatPlanType(type?: string | null): string {
