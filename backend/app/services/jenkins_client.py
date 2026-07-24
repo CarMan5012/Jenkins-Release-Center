@@ -7,6 +7,10 @@ from app.core.security import decrypt_secret
 
 class SafeSession(requests.Session):
     def resolve_redirects(self, resp, req, **kwargs):
+        if kwargs.get("yield_requests"):
+            yield from super().resolve_redirects(resp, req, **kwargs)
+            return
+
         from urllib.parse import urlparse
         orig_parsed = urlparse(resp.url)
         orig_origin = f"{orig_parsed.scheme}://{orig_parsed.netloc}"

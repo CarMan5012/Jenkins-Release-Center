@@ -4,13 +4,59 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 from fastapi import Request
 
 from app.core.exceptions import global_exception_handler
 from app.services import deps_helper, jenkins_backup_service
+from app.services.jenkins_client import SafeSession
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def redirecting_session(location="https://login.example/"):
+    session = SafeSession()
+    adapter = MagicMock()
+
+    def send(request, **kwargs):
+        response = requests.Response()
+        response.status_code = 301 if request.url == "https://jenkins.example/api/json" else 200
+        response.url = request.url
+        response.request = request
+        response.raw = MagicMock()
+        response._content = b""
+        if response.status_code == 301:
+            response.headers["Location"] = location
+        return response
+
+    adapter.send.side_effect = send
+    session.mount("https://", adapter)
+    return session
+
+
+def test_safe_session_exposes_cross_origin_redirect_without_following_it():
+    response = redirecting_session().get(
+        "https://jenkins.example/api/json",
+        allow_redirects=False,
+    )
+
+    assert response.status_code == 301
+    assert response.headers["Location"] == "https://login.example/"
+
+
+def test_safe_session_rejects_followed_cross_origin_redirect():
+    with pytest.raises(requests.exceptions.InvalidSchema):
+        redirecting_session().get("https://jenkins.example/api/json")
+
+
+def test_safe_session_follows_same_origin_redirect():
+    response = redirecting_session("https://jenkins.example/login").get(
+        "https://jenkins.example/api/json"
+    )
+
+    assert response.status_code == 200
+    assert response.url == "https://jenkins.example/login"
 
 
 def test_idempotency_keys_are_scoped_to_user_and_bounded():
