@@ -329,6 +329,75 @@ def scheduled_input(job, name="scheduled release"):
     )
 
 
+def immediate_input(job, name="immediate release"):
+    return ReleasePlanCreate(
+        name=name,
+        type="IMMEDIATE",
+        tasks=[ReleaseTaskCreate(
+            server_id=job.server_id,
+            job_id=job.id,
+            job_name=job.name,
+            branch="main",
+            sequence=0,
+        )],
+    )
+
+
+def test_immediate_create_only_runs_after_preflight_passes(db):
+    existing, server = persist_plan(db)
+    user = existing.creator
+    job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
+    background_tasks = BackgroundTasks()
+
+    def fake_preflight(session, plan):
+        assert plan.status == "WAITING"
+        assert all(task.status == "WAITING" for task in plan.tasks)
+        assert background_tasks.tasks == []
+        plan.preflight_status = "PASSED"
+        return plan
+
+    with (
+        patch.object(release_api, "validate_release_plan_input"),
+        patch.object(release_api, "run_release_preflight", fake_preflight),
+    ):
+        result = release_api.create_plan(
+            api_request(), immediate_input(job), background_tasks, db, user
+        )
+
+    assert result.status == "RUNNING"
+    assert len(background_tasks.tasks) == 1
+    callback = background_tasks.tasks[0]
+    assert callback.func is release_api.execute_release_task
+    assert callback.args == (result.id, result.tasks[0].id)
+
+
+@pytest.mark.parametrize("preflight_status", ["WARNING", "FAILED", "UNCHECKED", "UNKNOWN"])
+def test_immediate_create_waits_when_preflight_does_not_pass(db, preflight_status):
+    existing, server = persist_plan(db)
+    user = existing.creator
+    job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
+    background_tasks = BackgroundTasks()
+
+    def fake_preflight(session, plan):
+        plan.preflight_status = preflight_status
+        plan.preflight_result = {"summary": preflight_status}
+        session.commit()
+        return plan
+
+    with (
+        patch.object(release_api, "validate_release_plan_input"),
+        patch.object(release_api, "run_release_preflight", fake_preflight),
+    ):
+        result = release_api.create_plan(
+            api_request(), immediate_input(job), background_tasks, db, user
+        )
+
+    assert result.status == "WAITING"
+    assert all(task.status == "WAITING" for task in result.tasks)
+    assert result.preflight_result == {"summary": preflight_status}
+    assert background_tasks.tasks == []
+
+
 def test_create_runs_preflight_after_plan_and_tasks_are_persisted(db):
     existing, server = persist_plan(db)
     user = existing.creator
@@ -367,6 +436,7 @@ def test_immediate_create_persists_failure_when_preflight_crashes(db):
         )],
     )
 
+    background_tasks = BackgroundTasks()
     with (
         patch.object(release_api, "validate_release_plan_input"),
         patch.object(
@@ -377,7 +447,7 @@ def test_immediate_create_persists_failure_when_preflight_crashes(db):
     ):
         with pytest.raises(RuntimeError, match="secret-token"):
             release_api.create_plan(
-                api_request(), plan_in, BackgroundTasks(), db, existing.creator
+                api_request(), plan_in, background_tasks, db, existing.creator
             )
 
     plan = db.query(ReleasePlan).filter_by(name=plan_in.name).one()
@@ -386,6 +456,7 @@ def test_immediate_create_persists_failure_when_preflight_crashes(db):
     assert all(task.finished_at is not None for task in plan.tasks)
     assert all(task.error_message == "发布前检查异常" for task in plan.tasks)
     assert "secret-token" not in plan.tasks[0].error_message
+    assert background_tasks.tasks == []
 
 
 def test_update_resets_and_runs_preflight_after_scheduler_success(db):

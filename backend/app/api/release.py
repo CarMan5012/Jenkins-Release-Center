@@ -206,19 +206,31 @@ def create_plan(
     
     # 3. Schedule or execution trigger
     if plan.type == "IMMEDIATE":
-        plan.status = "RUNNING"
-        db.commit()
-        
-        if plan_in.type == "PIPELINE":
-            # For pipeline, start only the sequence 0 task
-            first_task = next((t for t in plan.tasks if t.sequence == 0), None)
-            if first_task:
-                background_tasks.add_task(execute_release_task, plan.id, first_task.id)
-        else:
-            # For batch or normal, start everything immediately
-            for t in plan.tasks:
-                background_tasks.add_task(execute_release_task, plan.id, t.id)
-                
+        try:
+            plan = run_release_preflight(db, plan)
+        except Exception:
+            plan.status = "FAILED"
+            for task in plan.tasks:
+                if task.status == "WAITING":
+                    task.status = "FAILED"
+                    task.error_message = "发布前检查异常"
+                    task.finished_at = datetime.now()
+            db.commit()
+            raise
+
+        if plan.preflight_status == "PASSED":
+            plan.status = "RUNNING"
+            db.commit()
+
+            if plan_in.type == "PIPELINE":
+                # For pipeline, start only the sequence 0 task
+                first_task = next((t for t in plan.tasks if t.sequence == 0), None)
+                if first_task:
+                    background_tasks.add_task(execute_release_task, plan.id, first_task.id)
+            else:
+                # For batch or normal, start everything immediately
+                for t in plan.tasks:
+                    background_tasks.add_task(execute_release_task, plan.id, t.id)
     else: # SCHEDULED, BATCH, PIPELINE (Scheduled)
         # Persist every calculated time together before touching the external scheduler.
         for t in plan.tasks:
@@ -242,19 +254,6 @@ def create_plan(
             db.commit()
             raise HTTPException(status_code=503, detail=f"注册发布排程失败: {error}")
                 
-    if plan.type == "IMMEDIATE":
-        try:
-            plan = run_release_preflight(db, plan)
-        except Exception:
-            plan.status = "FAILED"
-            for task in plan.tasks:
-                if task.status == "WAITING":
-                    task.status = "FAILED"
-                    task.error_message = "发布前检查异常"
-                    task.finished_at = datetime.now()
-            db.commit()
-            raise
-    else:
         plan = run_release_preflight(db, plan)
     log_action(db, current_user, "CREATE_RELEASE_PLAN", get_client_ip(request), f"Created release plan: {plan.name}")
     return plan
