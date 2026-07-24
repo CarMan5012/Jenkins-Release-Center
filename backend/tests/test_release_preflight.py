@@ -230,13 +230,17 @@ def test_execute_release_task_does_not_start_inappropriate_work(db, monkeypatch,
     thread.assert_not_called()
 
 
-@pytest.mark.parametrize("preflight_status", ["FAILED", "UNCHECKED"])
+@pytest.mark.parametrize(
+    ("preflight_status", "plan_status"),
+    [("FAILED", "WAITING"), ("UNCHECKED", "RUNNING")],
+)
 def test_execute_task_workflow_claim_rechecks_preflight_atomically(
-    db, monkeypatch, preflight_status
+    db, monkeypatch, preflight_status, plan_status
 ):
-    plan, _ = persist_plan(db)
-    task = plan.tasks[0]
+    plan, _ = persist_plan(db, jobs=("root", "dependent"))
+    task = min(plan.tasks, key=lambda current: current.sequence)
     plan.preflight_status = preflight_status
+    plan.status = plan_status
     db.commit()
     monkeypatch.setattr(release_service, "SyncSessionLocal", lambda: Session(db.bind))
 
@@ -251,7 +255,13 @@ def test_execute_task_workflow_claim_rechecks_preflight_atomically(
     db.expire_all()
     notification.assert_not_called()
     client.assert_not_called()
-    assert db.get(ReleaseTask, task.id).status == "WAITING"
+    plan = db.get(ReleasePlan, plan.id)
+    assert plan.status == "FAILED"
+    assert {current.status for current in plan.tasks} == {"FAILED"}
+    assert {current.error_message for current in plan.tasks} == {
+        preflight_block_reason(plan)
+    }
+    assert all(current.finished_at is not None for current in plan.tasks)
 
 
 def install_client(monkeypatch, responder):

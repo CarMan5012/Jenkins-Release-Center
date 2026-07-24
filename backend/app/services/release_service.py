@@ -167,6 +167,28 @@ def execute_task_workflow(plan_id: int, task_id: int):
         res = db.execute(stmt)
         db.commit()
         if res.rowcount == 0:
+            db.expire_all()
+            plan = db.query(ReleasePlan).filter(ReleasePlan.id == plan_id).first()
+            task = db.query(ReleaseTask).filter(ReleaseTask.id == task_id).first()
+            if plan and task and task.plan_id == plan_id and task.status == "WAITING":
+                reason = preflight_block_reason(plan)
+                if reason:
+                    db.query(ReleaseTask).filter(
+                        ReleaseTask.plan_id == plan_id,
+                        ReleaseTask.status == "WAITING",
+                    ).update(
+                        {
+                            ReleaseTask.status: "FAILED",
+                            ReleaseTask.error_message: reason,
+                            ReleaseTask.finished_at: datetime.now(),
+                        },
+                        synchronize_session=False,
+                    )
+                    if plan.status in ["WAITING", "RUNNING"]:
+                        plan.status = "FAILED"
+                    db.commit()
+                    logger.warning(f"Release task blocked after claim rejection: {reason}")
+                    return
             logger.warning(f"Task {task_id} is already running or completed. Skipping execution.")
             return
 
