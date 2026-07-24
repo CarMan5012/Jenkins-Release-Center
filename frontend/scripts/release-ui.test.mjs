@@ -53,7 +53,7 @@ assert.equal(getStatusMeta('SUCCESS').tone, 'success');
 assert.equal(getStatusMeta('RUNNING').label, '运行中');
 assert.equal(getPreflightMeta('FAILED').label, '未通过');
 assert.equal(getPreflightMeta('FAILED').tone, 'danger');
-assert.equal(getPreflightMeta('WARNING').label, '警告');
+assert.deepEqual({ ...getPreflightMeta('WARNING') }, { label: '警告', tone: 'warning' });
 assert.equal(getPreflightMeta('PASSED').label, '通过');
 assert.equal(getPreflightMeta('PASSED').tone, 'success');
 assert.equal(getPreflightMeta('UNCHECKED').label, '未检查');
@@ -67,6 +67,7 @@ assert.equal(isPreflightBlocked('UNCHECKED'), true);
 assert.equal(isPreflightBlocked('FAILED'), true);
 assert.equal(isPreflightBlocked('WARNING'), false);
 assert.equal(isPreflightBlocked('PASSED'), false);
+assert.equal(isPreflightBlocked('UNKNOWN'), false);
 assert.equal(formatDuration(65), '1m 5s');
 assert.equal(formatDuration(null), '-');
 
