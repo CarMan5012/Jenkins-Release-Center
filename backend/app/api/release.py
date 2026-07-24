@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.future import select
-from sqlalchemy import update
+from sqlalchemy import exists, update
 from typing import List
 from datetime import datetime, timedelta
 from copy import deepcopy
@@ -66,6 +66,91 @@ def _register_release_jobs(plan: ReleasePlan) -> None:
         scheduler_manager.add_release_job(
             plan.id, task.id, task.scheduled_time, execute_release_task, plan.id, task.id
         )
+
+
+def _claim_schedule_recovery(db: Session, plan_id: int, revision: int) -> int | None:
+    claimed_revision = revision + 1
+    claimed = db.execute(
+        update(ReleasePlan)
+        .where(
+            ReleasePlan.id == plan_id,
+            ReleasePlan.status == "WAITING",
+            ReleasePlan.preflight_revision == revision,
+            ~exists().where(
+                ReleaseTask.plan_id == plan_id,
+                ReleaseTask.status != "WAITING",
+            ),
+        )
+        .values(
+            status="FAILED",
+            preflight_status="UNCHECKED",
+            preflight_revision=claimed_revision,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return claimed_revision if claimed.rowcount == 1 else None
+
+
+def _run_preflight_safely(
+    db: Session, plan: ReleasePlan, revision: int | None = None
+) -> ReleasePlan:
+    expected_revision = plan.preflight_revision if revision is None else revision
+    try:
+        return run_release_preflight(db, plan, expected_revision)
+    except Exception:
+        db.rollback()
+        db.expire_all()
+        current = db.execute(
+            select(ReleasePlan).filter(ReleasePlan.id == plan.id).options(
+                selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
+            )
+        ).scalars().first()
+        if not current:
+            return current
+        task_results = [
+            {
+                "task_id": task.id,
+                "job_name": task.job_name,
+                "status": "FAILED",
+                "checks": [{
+                    "code": "preflight",
+                    "status": "FAILED",
+                    "message": "发布前检查异常",
+                }],
+            }
+            for task in current.tasks
+        ]
+        failed = db.execute(
+            update(ReleasePlan)
+            .where(
+                ReleasePlan.id == plan.id,
+                ReleasePlan.status == "WAITING",
+                ReleasePlan.preflight_revision == expected_revision,
+                ~exists().where(
+                    ReleaseTask.plan_id == plan.id,
+                    ReleaseTask.status != "WAITING",
+                ),
+            )
+            .values(
+                preflight_status="FAILED",
+                preflight_checked_at=datetime.now(),
+                preflight_result={
+                    "summary": "发布前检查异常",
+                    "tasks": task_results,
+                },
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if failed.rowcount == 1:
+            db.commit()
+        else:
+            db.rollback()
+        db.expire_all()
+        return db.execute(
+            select(ReleasePlan).filter(ReleasePlan.id == plan.id).options(
+                selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
+            )
+        ).scalars().first()
 
 
 def _activate_release_jobs(db: Session, plan: ReleasePlan, revision: int) -> ReleasePlan:
@@ -273,21 +358,27 @@ def create_plan(
     
     # 3. Schedule or execution trigger
     if plan.type == "IMMEDIATE":
-        try:
-            plan = run_release_preflight(db, plan)
-        except Exception:
-            plan.status = "FAILED"
-            for task in plan.tasks:
-                if task.status == "WAITING":
-                    task.status = "FAILED"
-                    task.error_message = "发布前检查异常"
-                    task.finished_at = datetime.now()
-            db.commit()
-            raise
+        revision = plan.preflight_revision
+        plan = _run_preflight_safely(db, plan, revision)
 
         if plan.preflight_status == "PASSED":
-            plan.status = "RUNNING"
+            claimed = db.execute(
+                update(ReleasePlan)
+                .where(
+                    ReleasePlan.id == plan.id,
+                    ReleasePlan.type == "IMMEDIATE",
+                    ReleasePlan.status == "WAITING",
+                    ReleasePlan.preflight_status == "PASSED",
+                    ReleasePlan.preflight_revision == revision,
+                )
+                .values(status="RUNNING")
+                .execution_options(synchronize_session=False)
+            )
             db.commit()
+            if claimed.rowcount != 1:
+                db.expire_all()
+                return db.get(ReleasePlan, plan.id)
+            db.refresh(plan)
 
             if plan_in.type == "PIPELINE":
                 # For pipeline, start only the sequence 0 task
@@ -308,8 +399,8 @@ def create_plan(
         db.commit()
 
         revision = plan.preflight_revision
+        plan = _run_preflight_safely(db, plan, revision)
         try:
-            plan = run_release_preflight(db, plan, revision)
             plan = _activate_release_jobs(db, plan, revision)
         except HTTPException:
             raise
@@ -317,15 +408,13 @@ def create_plan(
             for t in plan.tasks:
                 scheduler_manager.remove_release_job(plan.id, t.id)
             db.rollback()
+            if _claim_schedule_recovery(db, plan.id, revision) is None:
+                db.rollback()
+                raise HTTPException(status_code=409, detail="发布计划状态已变化")
             db.expire_all()
             current = db.get(ReleasePlan, plan.id)
-            if (
-                not current
-                or current.status != "WAITING"
-                or current.preflight_revision != revision
-            ):
-                raise HTTPException(status_code=409, detail="发布计划状态已变化")
-            db.delete(current)
+            if current:
+                db.delete(current)
             db.commit()
             raise HTTPException(status_code=503, detail=f"注册发布排程失败: {error}")
     log_action(db, current_user, "CREATE_RELEASE_PLAN", get_client_ip(request), f"Created release plan: {plan.name}")
@@ -372,7 +461,7 @@ def preflight_plan(
         raise HTTPException(status_code=404, detail="发布计划不存在")
     if plan.status != "WAITING" or any(task.status != "WAITING" for task in plan.tasks):
         raise HTTPException(status_code=409, detail="发布计划状态已变化")
-    return run_release_preflight(db, plan, plan.preflight_revision)
+    return _run_preflight_safely(db, plan, plan.preflight_revision)
 
 
 @router.post("/plans/{plan_id}/cancel")
@@ -539,18 +628,37 @@ def update_plan(
         raise HTTPException(status_code=400, detail="只有等待执行状态的计划才可以被修改")
 
     old_plan_data, old_task_data = _snapshot_release_plan(plan)
-    plan.preflight_status = "UNCHECKED"
-    plan.preflight_revision = ReleasePlan.preflight_revision + 1
-
-    # 3. Cleanup existing scheduler registrations
-    for t in plan.tasks:
-        scheduler_manager.remove_release_job(plan.id, t.id)
-        
-    # 4. Cascade delete existing tasks
-    for t in list(plan.tasks):
-        db.delete(t)
-    db.flush()
-    
+    old_revision = plan.preflight_revision
+    task_ids = [task.id for task in plan.tasks]
+    claimed_tasks = db.execute(
+        update(ReleaseTask)
+        .where(
+            ReleaseTask.plan_id == plan_id,
+            ReleaseTask.id.in_(task_ids),
+            ReleaseTask.status == "WAITING",
+        )
+        .values(status="EDITING")
+        .execution_options(synchronize_session=False)
+    )
+    if claimed_tasks.rowcount != len(task_ids):
+        db.rollback()
+        raise HTTPException(status_code=409, detail="发布计划状态已变化")
+    claimed_plan = db.execute(
+        update(ReleasePlan)
+        .where(
+            ReleasePlan.id == plan_id,
+            ReleasePlan.status == "WAITING",
+            ReleasePlan.preflight_revision == old_revision,
+        )
+        .values(
+            preflight_status="UNCHECKED",
+            preflight_revision=old_revision + 1,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if claimed_plan.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="发布计划状态已变化")
 
     # 6. Update ReleasePlan fields
     plan.name = plan_in.name
@@ -591,6 +699,12 @@ def update_plan(
                     if actual_task:
                         actual_task.depends_on_task_id = seq_to_task_map[dep_seq]
         db.flush()
+
+    # Keep the claimed rows until replacements have IDs so SQLite cannot
+    # reuse an old task ID while its scheduler entry is still being removed.
+    for task in list(plan.tasks):
+        db.delete(task)
+    db.flush()
         
     for t in new_tasks:
         task_time = plan.execute_time
@@ -600,6 +714,11 @@ def update_plan(
 
     db.commit()
 
+    # Old task IDs are harmless after commit and can now be removed without
+    # contending with APScheduler's job store on the same SQLite database.
+    for task_data in old_task_data:
+        scheduler_manager.remove_release_job(plan_id, task_data["id"])
+
     plan = db.execute(
         select(ReleasePlan).filter(ReleasePlan.id == plan_id).options(
             selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
@@ -608,8 +727,8 @@ def update_plan(
     revision = plan.preflight_revision
 
     # 8. Check first, then expose jobs to APScheduler.
+    plan = _run_preflight_safely(db, plan, revision)
     try:
-        plan = run_release_preflight(db, plan, revision)
         plan = _activate_release_jobs(db, plan, revision)
     except HTTPException:
         raise
@@ -617,14 +736,12 @@ def update_plan(
         for t in plan.tasks:
             scheduler_manager.remove_release_job(plan_id, t.id)
         db.rollback()
-        db.expire_all()
-        current = db.get(ReleasePlan, plan_id)
-        if (
-            not current
-            or current.status != "WAITING"
-            or current.preflight_revision != revision
-        ):
+        claimed_revision = _claim_schedule_recovery(db, plan_id, revision)
+        if claimed_revision is None:
+            db.rollback()
             raise HTTPException(status_code=409, detail="发布计划状态已变化")
+        old_plan_data["preflight_revision"] = claimed_revision
+        db.expire_all()
         restored_plan = _restore_release_plan(db, old_plan_data, old_task_data)
         restoration_error = None
         try:

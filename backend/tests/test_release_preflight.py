@@ -450,17 +450,16 @@ def test_immediate_create_persists_failure_when_preflight_crashes(db):
             side_effect=RuntimeError("secret-token"),
         ),
     ):
-        with pytest.raises(RuntimeError, match="secret-token"):
-            release_api.create_plan(
-                api_request(), plan_in, background_tasks, db, existing.creator
-            )
+        result = release_api.create_plan(
+            api_request(), plan_in, background_tasks, db, existing.creator
+        )
 
     plan = db.query(ReleasePlan).filter_by(name=plan_in.name).one()
-    assert plan.status == "FAILED"
-    assert all(task.status == "FAILED" for task in plan.tasks)
-    assert all(task.finished_at is not None for task in plan.tasks)
-    assert all(task.error_message == "发布前检查异常" for task in plan.tasks)
-    assert "secret-token" not in plan.tasks[0].error_message
+    assert result.id == plan.id
+    assert plan.status == "WAITING"
+    assert plan.preflight_status == "FAILED"
+    assert all(task.status == "WAITING" for task in plan.tasks)
+    assert "secret-token" not in json.dumps(plan.preflight_result, ensure_ascii=False)
     assert background_tasks.tasks == []
 
 
