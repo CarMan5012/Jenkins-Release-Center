@@ -1,15 +1,21 @@
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, wait
+from time import monotonic
+from types import SimpleNamespace
 from urllib.parse import quote, urljoin, urlparse
 
 import requests
+from sqlalchemy import exists, update
 from sqlalchemy.orm import Session
 
 from app.models.jenkins import JenkinsServer
-from app.models.release import ReleasePlan
+from app.models.release import ReleasePlan, ReleaseTask
 from app.services.jenkins_client import JenkinsClient
 
 
 SEVERITY = {"PASSED": 0, "WARNING": 1, "FAILED": 2}
+PREFLIGHT_WORKERS = 8
+PREFLIGHT_DEADLINE_SECONDS = 30
 
 
 def url_origin(url: str) -> tuple[str, str, int]:
@@ -51,6 +57,8 @@ def _server_probe(client: JenkinsClient) -> dict:
             timeout=10,
             allow_redirects=False,
         )
+    except requests.exceptions.SSLError:
+        return _check("connection", "FAILED", "Jenkins TLS 认证失败")
     except (requests.Timeout, requests.ConnectionError):
         return _check("connection", "WARNING", "Jenkins 暂时无法连接")
     except requests.RequestException:
@@ -68,8 +76,8 @@ def _server_probe(client: JenkinsClient) -> dict:
         if not isinstance(payload, dict) or url_origin(payload.get("url", "")) != configured:
             raise ValueError("Origin mismatch")
         location = canonical.headers.get("Location")
-        if 300 <= canonical.status_code < 400 and location:
-            if url_origin(urljoin(client.base_url, location)) != configured:
+        if 300 <= canonical.status_code < 400:
+            if not location or url_origin(urljoin(client.base_url, location)) != configured:
                 raise ValueError("Origin mismatch")
     except (TypeError, ValueError):
         return _check("origin", "FAILED", "Jenkins Origin 不一致")
@@ -108,6 +116,8 @@ def _job_checks(client: JenkinsClient, task) -> list[dict]:
     )
     try:
         response = client.session.get(url, timeout=10, allow_redirects=False)
+    except requests.exceptions.SSLError:
+        return [_check("job", "FAILED", "Jenkins TLS 认证失败")]
     except (requests.Timeout, requests.ConnectionError):
         return [_check("job", "WARNING", "Jenkins 任务暂时无法连接")]
     except requests.RequestException:
@@ -141,40 +151,126 @@ def _job_checks(client: JenkinsClient, task) -> list[dict]:
     ]
 
 
-def run_release_preflight(db: Session, plan: ReleasePlan) -> ReleasePlan:
-    server_cache = {}
-    task_results = []
-    for task in plan.tasks:
-        if task.server_id not in server_cache:
-            server = db.get(JenkinsServer, task.server_id)
-            if not server:
-                server_cache[task.server_id] = (None, _check("server", "FAILED", "Jenkins 配置不存在"))
-            elif not server.is_active:
-                server_cache[task.server_id] = (None, _check("server", "FAILED", "Jenkins 配置已禁用"))
-            else:
-                client = JenkinsClient(server.url, server.username, server.api_token)
-                server_cache[task.server_id] = (client, _server_probe(client))
+def _client(config) -> JenkinsClient:
+    return JenkinsClient(config.url, config.username, config.api_token)
 
-        client, server_check = server_cache[task.server_id]
-        checks = [server_check]
-        if server_check["status"] == "PASSED":
-            checks.extend(_job_checks(client, task))
-        task_results.append(
-            {
+
+def _job_probe(config, task) -> list[dict]:
+    return _job_checks(_client(config), task)
+
+
+def run_release_preflight(
+    db: Session, plan: ReleasePlan, expected_revision: int | None = None
+) -> ReleasePlan:
+    revision = plan.preflight_revision if expected_revision is None else expected_revision
+    tasks = [
+        SimpleNamespace(
+            id=task.id,
+            server_id=task.server_id,
+            job_name=task.job_name,
+            parameters=dict(task.parameters or {}),
+        )
+        for task in plan.tasks
+    ]
+    server_ids = {task.server_id for task in tasks}
+    configs = {}
+    server_checks = {}
+    for server_id in server_ids:
+        server = db.get(JenkinsServer, server_id)
+        if not server:
+            server_checks[server_id] = _check("server", "FAILED", "Jenkins 配置不存在")
+        elif not server.is_active:
+            server_checks[server_id] = _check("server", "FAILED", "Jenkins 配置已禁用")
+        else:
+            configs[server_id] = SimpleNamespace(
+                url=server.url, username=server.username, api_token=server.api_token
+            )
+
+    deadline = monotonic() + PREFLIGHT_DEADLINE_SECONDS
+    executor = ThreadPoolExecutor(max_workers=PREFLIGHT_WORKERS)
+    try:
+        probes = {
+            executor.submit(lambda config=config: _server_probe(_client(config))): server_id
+            for server_id, config in configs.items()
+        }
+        done, pending = wait(probes, timeout=max(0, deadline - monotonic()))
+        for future in done:
+            server_id = probes[future]
+            try:
+                server_checks[server_id] = future.result()
+            except Exception:
+                server_checks[server_id] = _check("server", "FAILED", "Jenkins 检查异常")
+        for future in pending:
+            future.cancel()
+            server_checks[probes[future]] = _check("connection", "WARNING", "Jenkins 检查超时")
+
+        results = [None] * len(tasks)
+        jobs = {}
+        for index, task in enumerate(tasks):
+            server_check = server_checks[task.server_id]
+            if server_check["status"] != "PASSED":
+                checks = [server_check]
+                results[index] = {
+                    "task_id": task.id,
+                    "job_name": task.job_name,
+                    "status": aggregate_status(check["status"] for check in checks),
+                    "checks": checks,
+                }
+                continue
+            future = executor.submit(_job_probe, configs[task.server_id], task)
+            jobs[future] = (index, task, server_check)
+
+        done, pending = wait(jobs, timeout=max(0, deadline - monotonic()))
+        for future in done:
+            index, task, server_check = jobs[future]
+            try:
+                checks = [server_check, *future.result()]
+            except Exception:
+                checks = [server_check, _check("job", "FAILED", "Jenkins 任务检查异常")]
+            results[index] = {
                 "task_id": task.id,
                 "job_name": task.job_name,
                 "status": aggregate_status(check["status"] for check in checks),
                 "checks": checks,
             }
-        )
+        for future in pending:
+            future.cancel()
+            index, task, server_check = jobs[future]
+            checks = [server_check, _check("job", "WARNING", "Jenkins 任务检查超时")]
+            results[index] = {
+                "task_id": task.id,
+                "job_name": task.job_name,
+                "status": "WARNING",
+                "checks": checks,
+            }
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
-    status = aggregate_status(task["status"] for task in task_results)
-    plan.preflight_status = status
-    plan.preflight_checked_at = datetime.now()
-    plan.preflight_result = {
-        "summary": f"{len(task_results)} 个任务，状态 {status}",
-        "tasks": task_results,
+    status = aggregate_status(task["status"] for task in results)
+    result = {
+        "summary": f"{len(results)} 个任务，状态 {status}",
+        "tasks": results,
     }
-    db.commit()
-    db.refresh(plan)
-    return plan
+    updated = db.execute(
+        update(ReleasePlan)
+        .where(
+            ReleasePlan.id == plan.id,
+            ReleasePlan.preflight_revision == revision,
+            ReleasePlan.status == "WAITING",
+            ~exists().where(
+                ReleaseTask.plan_id == plan.id,
+                ReleaseTask.status != "WAITING",
+            ),
+        )
+        .values(
+            preflight_status=status,
+            preflight_checked_at=datetime.now(),
+            preflight_result=result,
+        )
+    )
+    if updated.rowcount == 1:
+        db.commit()
+    else:
+        db.rollback()
+    db.expire_all()
+    return db.get(ReleasePlan, plan.id)

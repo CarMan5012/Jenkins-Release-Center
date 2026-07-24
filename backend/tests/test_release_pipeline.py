@@ -58,8 +58,10 @@ def test_pipeline_requires_each_step_to_depend_on_previous_sequence():
 
 
 def test_pipeline_accepts_strict_serial_dependency_chain():
-    with patch.object(JenkinsClient, "get_job_parameters", return_value=[]):
+    with patch.object(JenkinsClient, "get_job_parameters", side_effect=AssertionError("network call")) as remote:
         validate_release_plan_input(validation_db(), pipeline_input([None, 0, 1]))
+
+    remote.assert_not_called()
 
 
 def pipeline_session(failure_strategy="STOP"):

@@ -19,6 +19,7 @@ class ReleasePlan(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
     idempotency_key: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True)
     preflight_status: Mapped[str] = mapped_column(String(20), default="UNCHECKED", nullable=False)
+    preflight_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     preflight_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     preflight_result: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
 

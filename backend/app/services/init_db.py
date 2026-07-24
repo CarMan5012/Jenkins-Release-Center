@@ -14,6 +14,7 @@ def ensure_release_plan_preflight_columns(engine) -> None:
     columns = {column["name"] for column in inspector.get_columns("release_plan")}
     definitions = {
         "preflight_status": "VARCHAR(20) NOT NULL DEFAULT 'UNCHECKED'",
+        "preflight_revision": "INTEGER NOT NULL DEFAULT 0",
         "preflight_checked_at": "DATETIME NULL",
         "preflight_result": "JSON NULL",
     }

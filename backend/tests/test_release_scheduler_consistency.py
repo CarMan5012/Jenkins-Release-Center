@@ -67,8 +67,14 @@ def scheduled_input(job, name="scheduled release"):
 def test_create_removes_persisted_plan_when_scheduler_registration_fails():
     db, user, _server, _old_job, new_job = release_session()
 
+    def pass_preflight(session, plan, revision=None):
+        plan.preflight_status = "PASSED"
+        session.commit()
+        return plan
+
     with (
         patch("app.api.release.validate_release_plan_input"),
+        patch("app.api.release.run_release_preflight", pass_preflight),
         patch.object(scheduler_manager, "add_release_job", side_effect=RuntimeError("scheduler down")),
         patch.object(scheduler_manager, "remove_release_job") as remove_job,
     ):
@@ -109,8 +115,14 @@ def test_update_rolls_back_database_and_restores_old_schedule_on_failure():
     db.commit()
     old_task_id = old_task.id
 
+    def pass_preflight(session, current, revision=None):
+        current.preflight_status = "PASSED"
+        session.commit()
+        return current
+
     with (
         patch("app.api.release.validate_release_plan_input"),
+        patch("app.api.release.run_release_preflight", pass_preflight),
         patch.object(scheduler_manager, "remove_release_job") as remove_job,
         patch.object(
             scheduler_manager,
@@ -138,3 +150,64 @@ def test_update_rolls_back_database_and_restores_old_schedule_on_failure():
     restored_call = add_job.call_args_list[-1]
     assert restored_call.args[0:3] == (plan.id, old_task_id, old_time)
     remove_job.assert_called()
+
+
+def test_update_does_not_restore_old_data_after_concurrent_execution_claim():
+    db, user, server, old_job, new_job = release_session()
+    old_time = datetime.now() + timedelta(minutes=20)
+    plan = ReleasePlan(
+        name="original",
+        type="SCHEDULED",
+        execute_time=old_time,
+        interval_minutes=0,
+        pipeline_failure_strategy="STOP",
+        status="WAITING",
+        creator_id=user.id,
+        preflight_status="PASSED",
+    )
+    db.add(plan)
+    db.flush()
+    db.add(ReleaseTask(
+        plan_id=plan.id,
+        server_id=server.id,
+        job_id=old_job.id,
+        job_name=old_job.name,
+        branch="main",
+        sequence=0,
+        status="WAITING",
+        scheduled_time=old_time,
+    ))
+    db.commit()
+
+    def pass_preflight(session, current, revision=None):
+        current.preflight_status = "PASSED"
+        session.commit()
+        return current
+
+    def claim_then_fail(*args, **kwargs):
+        current = db.get(ReleasePlan, plan.id)
+        current.status = "RUNNING"
+        db.commit()
+        raise RuntimeError("scheduler down")
+
+    with (
+        patch("app.api.release.validate_release_plan_input"),
+        patch("app.api.release.run_release_preflight", pass_preflight),
+        patch.object(scheduler_manager, "remove_release_job"),
+        patch.object(scheduler_manager, "add_release_job", side_effect=claim_then_fail),
+    ):
+        with pytest.raises(HTTPException) as error:
+            update_plan(
+                request("PUT", f"/plans/{plan.id}"),
+                plan.id,
+                scheduled_input(new_job, "replacement"),
+                db,
+                user,
+            )
+
+    assert error.value.status_code == 409
+    current = db.get(ReleasePlan, plan.id)
+    db.refresh(current)
+    assert current.status == "RUNNING"
+    assert current.name == "replacement"
+    assert current.tasks[0].job_name == "new-deploy"

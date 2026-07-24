@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.future import select
+from sqlalchemy import update
 from typing import List
 from datetime import datetime, timedelta
+from copy import deepcopy
 
 from app.core.database import get_db
 from app.api.deps import get_current_user, get_current_active_operator, log_action
@@ -17,6 +19,86 @@ from app.services.release_service import execute_release_task
 from app.services.deps_helper import get_client_ip, normalize_idempotency_key
 
 router = APIRouter()
+
+
+def _snapshot_release_plan(plan: ReleasePlan) -> tuple[dict, list[dict]]:
+    plan_data = {
+        column.name: deepcopy(getattr(plan, column.name))
+        for column in ReleasePlan.__table__.columns
+    }
+    task_data = [
+        {
+            column.name: deepcopy(getattr(task, column.name))
+            for column in ReleaseTask.__table__.columns
+        }
+        for task in plan.tasks
+    ]
+    return plan_data, task_data
+
+
+def _restore_release_plan(db: Session, plan_data: dict, task_data: list[dict]) -> ReleasePlan:
+    plan = db.execute(
+        select(ReleasePlan).filter(ReleasePlan.id == plan_data["id"]).options(
+            selectinload(ReleasePlan.tasks)
+        )
+    ).scalars().first()
+    for task in list(plan.tasks):
+        db.delete(task)
+    db.flush()
+    for name, value in plan_data.items():
+        setattr(plan, name, value)
+    for values in sorted(task_data, key=lambda item: item["id"]):
+        db.add(ReleaseTask(**values))
+    db.commit()
+    return db.execute(
+        select(ReleasePlan).filter(ReleasePlan.id == plan.id).options(
+            selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
+        )
+    ).scalars().first()
+
+
+def _register_release_jobs(plan: ReleasePlan) -> None:
+    if plan.type == "IMMEDIATE":
+        return
+    for task in plan.tasks:
+        if plan.type == "PIPELINE" and task.sequence != 0:
+            continue
+        scheduler_manager.add_release_job(
+            plan.id, task.id, task.scheduled_time, execute_release_task, plan.id, task.id
+        )
+
+
+def _activate_release_jobs(db: Session, plan: ReleasePlan, revision: int) -> ReleasePlan:
+    def current_plan():
+        db.expire_all()
+        return db.execute(
+            select(ReleasePlan).filter(ReleasePlan.id == plan.id).options(
+                selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
+            )
+        ).scalars().first()
+
+    current = current_plan()
+    if (
+        not current
+        or current.status != "WAITING"
+        or current.preflight_revision != revision
+        or current.preflight_status not in {"PASSED", "WARNING", "FAILED"}
+        or any(task.status != "WAITING" for task in current.tasks)
+    ):
+        raise HTTPException(status_code=409, detail="发布计划状态已变化")
+    _register_release_jobs(current)
+    verified = current_plan()
+    if (
+        not verified
+        or verified.status != "WAITING"
+        or verified.preflight_revision != revision
+        or verified.preflight_status not in {"PASSED", "WARNING", "FAILED"}
+        or any(task.status != "WAITING" for task in verified.tasks)
+    ):
+        for task in current.tasks:
+            scheduler_manager.remove_release_job(current.id, task.id)
+        raise HTTPException(status_code=409, detail="发布计划状态已变化")
+    return verified
 
 
 def normalize_and_validate_execute_time(plan_type: str, execute_time):
@@ -53,7 +135,6 @@ def validate_release_plan_input(db: Session, plan_in: ReleasePlanCreate):
             raise HTTPException(status_code=400, detail="任务 sequence 必须从 0 开始且连续递增")
             
     from app.models.jenkins import JenkinsServer, JenkinsJob
-    from app.services.jenkins_client import JenkinsClient
     
     # 5. 校验各任务及参数
     for task_in in plan_in.tasks:
@@ -93,20 +174,6 @@ def validate_release_plan_input(db: Session, plan_in: ReleasePlanCreate):
         if len(params) > 100:
             raise HTTPException(status_code=400, detail="单个任务的参数数量不能超过 100")
             
-        # 校验未知参数
-        try:
-            client = JenkinsClient(server.url, server.username, server.api_token)
-            defined_params = client.get_job_parameters(job.name)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"获取 Jenkins 参数定义失败: {str(e)}")
-            
-        if defined_params:
-            for key in params.keys():
-                if key not in defined_params:
-                    raise HTTPException(status_code=400, detail=f"任务 [{job.name}] 包含未知参数键 [{key}]")
-        else:
-            if params:
-                raise HTTPException(status_code=400, detail=f"任务 [{job.name}] 不需要任何参数")
 
 @router.post("/plans", response_model=ReleasePlanResponse)
 def create_plan(
@@ -240,21 +307,27 @@ def create_plan(
             t.scheduled_time = task_time
         db.commit()
 
+        revision = plan.preflight_revision
         try:
-            for t in plan.tasks:
-                if plan.type == "PIPELINE" and t.sequence != 0:
-                    continue
-                scheduler_manager.add_release_job(
-                    plan.id, t.id, t.scheduled_time, execute_release_task, plan.id, t.id
-                )
+            plan = run_release_preflight(db, plan, revision)
+            plan = _activate_release_jobs(db, plan, revision)
+        except HTTPException:
+            raise
         except Exception as error:
             for t in plan.tasks:
                 scheduler_manager.remove_release_job(plan.id, t.id)
-            db.delete(plan)
+            db.rollback()
+            db.expire_all()
+            current = db.get(ReleasePlan, plan.id)
+            if (
+                not current
+                or current.status != "WAITING"
+                or current.preflight_revision != revision
+            ):
+                raise HTTPException(status_code=409, detail="发布计划状态已变化")
+            db.delete(current)
             db.commit()
             raise HTTPException(status_code=503, detail=f"注册发布排程失败: {error}")
-                
-        plan = run_release_preflight(db, plan)
     log_action(db, current_user, "CREATE_RELEASE_PLAN", get_client_ip(request), f"Created release plan: {plan.name}")
     return plan
 
@@ -297,11 +370,9 @@ def preflight_plan(
     ).scalars().first()
     if not plan:
         raise HTTPException(status_code=404, detail="发布计划不存在")
-    plan.preflight_status = "UNCHECKED"
-    plan.preflight_checked_at = None
-    plan.preflight_result = None
-    db.commit()
-    return run_release_preflight(db, plan)
+    if plan.status != "WAITING" or any(task.status != "WAITING" for task in plan.tasks):
+        raise HTTPException(status_code=409, detail="发布计划状态已变化")
+    return run_release_preflight(db, plan, plan.preflight_revision)
 
 
 @router.post("/plans/{plan_id}/cancel")
@@ -381,13 +452,13 @@ def trigger_plan_immediately(
         if server and not server.is_active:
             raise HTTPException(status_code=400, detail=f"无法运行发布计划，任务绑定的 Jenkins 实例 [{server.name}] 已被禁用")
 
-    from sqlalchemy import update
     stmt_up = (
         update(ReleasePlan)
         .where(
             ReleasePlan.id == plan_id,
             ReleasePlan.status == "WAITING",
             ReleasePlan.preflight_status.in_(("PASSED", "WARNING")),
+            ReleasePlan.preflight_revision == plan.preflight_revision,
         )
         .values(status="RUNNING")
     )
@@ -466,10 +537,10 @@ def update_plan(
     # 2. Status constraint: only edit WAITING plans
     if plan.status != "WAITING":
         raise HTTPException(status_code=400, detail="只有等待执行状态的计划才可以被修改")
-        
+
+    old_plan_data, old_task_data = _snapshot_release_plan(plan)
     plan.preflight_status = "UNCHECKED"
-    plan.preflight_checked_at = None
-    plan.preflight_result = None
+    plan.preflight_revision = ReleasePlan.preflight_revision + 1
 
     # 3. Cleanup existing scheduler registrations
     for t in plan.tasks:
@@ -521,46 +592,43 @@ def update_plan(
                         actual_task.depends_on_task_id = seq_to_task_map[dep_seq]
         db.flush()
         
-    # 8. Re-register Scheduler
+    for t in new_tasks:
+        task_time = plan.execute_time
+        if plan.type == "BATCH" and plan.interval_minutes > 0:
+            task_time = plan.execute_time + timedelta(minutes=plan.interval_minutes * t.sequence)
+        t.scheduled_time = task_time
+
+    db.commit()
+
+    plan = db.execute(
+        select(ReleasePlan).filter(ReleasePlan.id == plan_id).options(
+            selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
+        )
+    ).scalars().first()
+    revision = plan.preflight_revision
+
+    # 8. Check first, then expose jobs to APScheduler.
     try:
-        if plan.type != "IMMEDIATE":
-            for t in new_tasks:
-                task_time = plan.execute_time
-                if plan.type == "BATCH" and plan.interval_minutes > 0:
-                    task_time = plan.execute_time + timedelta(minutes=plan.interval_minutes * t.sequence)
-
-                t.scheduled_time = task_time
-                if plan.type == "PIPELINE" and t.sequence != 0:
-                    continue
-                scheduler_manager.add_release_job(
-                    plan.id, t.id, task_time, execute_release_task, plan.id, t.id
-                )
-
-        db.commit()
+        plan = run_release_preflight(db, plan, revision)
+        plan = _activate_release_jobs(db, plan, revision)
+    except HTTPException:
+        raise
     except Exception as error:
-        for t in new_tasks:
+        for t in plan.tasks:
             scheduler_manager.remove_release_job(plan_id, t.id)
         db.rollback()
-
-        restored_plan = db.execute(
-            select(ReleasePlan).filter(ReleasePlan.id == plan_id).options(
-                selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
-            )
-        ).scalars().first()
+        db.expire_all()
+        current = db.get(ReleasePlan, plan_id)
+        if (
+            not current
+            or current.status != "WAITING"
+            or current.preflight_revision != revision
+        ):
+            raise HTTPException(status_code=409, detail="发布计划状态已变化")
+        restored_plan = _restore_release_plan(db, old_plan_data, old_task_data)
         restoration_error = None
         try:
-            if restored_plan and restored_plan.type != "IMMEDIATE":
-                for old_task in restored_plan.tasks:
-                    if restored_plan.type == "PIPELINE" and old_task.sequence != 0:
-                        continue
-                    scheduler_manager.add_release_job(
-                        restored_plan.id,
-                        old_task.id,
-                        old_task.scheduled_time,
-                        execute_release_task,
-                        restored_plan.id,
-                        old_task.id,
-                    )
+            _register_release_jobs(restored_plan)
         except Exception as restore_error:
             restoration_error = restore_error
 
@@ -576,7 +644,6 @@ def update_plan(
     res = db.execute(stmt)
     plan = res.scalars().first()
 
-    plan = run_release_preflight(db, plan)
     log_action(db, current_user, "UPDATE_RELEASE_PLAN", get_client_ip(request), f"Updated release plan: {plan.name}")
     return plan
 

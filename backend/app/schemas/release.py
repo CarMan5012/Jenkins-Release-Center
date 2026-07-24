@@ -63,6 +63,7 @@ class ReleasePlanResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     preflight_status: str = "UNCHECKED"
+    preflight_revision: int = 0
     preflight_checked_at: Optional[datetime] = None
     preflight_result: Optional[Dict[str, Any]] = None
     tasks: List[ReleaseTaskResponse] = []

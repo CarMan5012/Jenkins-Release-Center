@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
@@ -349,7 +351,7 @@ def test_immediate_create_only_runs_after_preflight_passes(db):
     job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
     background_tasks = BackgroundTasks()
 
-    def fake_preflight(session, plan):
+    def fake_preflight(session, plan, revision=None):
         assert plan.status == "WAITING"
         assert all(task.status == "WAITING" for task in plan.tasks)
         assert background_tasks.tasks == []
@@ -378,7 +380,7 @@ def test_immediate_create_waits_when_preflight_does_not_pass(db, preflight_statu
     job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
     background_tasks = BackgroundTasks()
 
-    def fake_preflight(session, plan):
+    def fake_preflight(session, plan, revision=None):
         plan.preflight_status = preflight_status
         plan.preflight_result = {"summary": preflight_status}
         session.commit()
@@ -403,15 +405,18 @@ def test_create_runs_preflight_after_plan_and_tasks_are_persisted(db):
     user = existing.creator
     job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
     seen = []
+    add_job = None
 
-    def fake_preflight(session, plan):
+    def fake_preflight(session, plan, revision=None):
+        add_job.assert_not_called()
         seen.append((plan.id, [task.id for task in plan.tasks]))
         plan.preflight_status = "PASSED"
+        session.commit()
         return plan
 
     with (
         patch.object(release_api, "validate_release_plan_input"),
-        patch.object(scheduler_manager, "add_release_job"),
+        patch.object(scheduler_manager, "add_release_job") as add_job,
         patch.object(release_api, "run_release_preflight", fake_preflight, create=True),
     ):
         result = release_api.create_plan(
@@ -459,7 +464,7 @@ def test_immediate_create_persists_failure_when_preflight_crashes(db):
     assert background_tasks.tasks == []
 
 
-def test_update_resets_and_runs_preflight_after_scheduler_success(db):
+def test_update_runs_preflight_before_scheduler_activation(db):
     plan, server = persist_plan(db)
     user = plan.creator
     job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
@@ -467,20 +472,25 @@ def test_update_resets_and_runs_preflight_after_scheduler_success(db):
     plan.preflight_checked_at = datetime.now()
     plan.preflight_result = {"stale": True}
     db.commit()
+    old_revision = plan.preflight_revision
     seen = []
+    add_job = None
 
-    def fake_preflight(session, updated):
+    def fake_preflight(session, updated, revision=None):
+        add_job.assert_not_called()
         assert updated.preflight_status == "UNCHECKED"
-        assert updated.preflight_checked_at is None
-        assert updated.preflight_result is None
+        assert updated.preflight_checked_at is not None
+        assert updated.preflight_result == {"stale": True}
+        assert updated.preflight_revision == old_revision + 1
         seen.append(updated.id)
         updated.preflight_status = "PASSED"
+        session.commit()
         return updated
 
     with (
         patch.object(release_api, "validate_release_plan_input"),
         patch.object(scheduler_manager, "remove_release_job"),
-        patch.object(scheduler_manager, "add_release_job"),
+        patch.object(scheduler_manager, "add_release_job") as add_job,
         patch.object(release_api, "run_release_preflight", fake_preflight, create=True),
     ):
         result = release_api.update_plan(
@@ -493,20 +503,23 @@ def test_update_resets_and_runs_preflight_after_scheduler_success(db):
 
     assert seen == [plan.id]
     assert result.preflight_status == "PASSED"
+    add_job.assert_called_once()
 
 
-def test_manual_preflight_persists_invalidation_before_recheck(db):
+def test_manual_preflight_keeps_last_complete_result_while_rechecking(db):
     plan, _ = persist_plan(db)
     plan.preflight_status = "PASSED"
     plan.preflight_checked_at = datetime.now()
     plan.preflight_result = {"summary": "stale"}
     db.commit()
 
-    def fake_preflight(session, current):
+    def fake_preflight(session, current, revision):
         session.expire(current)
-        assert current.preflight_status == "UNCHECKED"
-        assert current.preflight_checked_at is None
-        assert current.preflight_result is None
+        assert current.preflight_status == "PASSED"
+        assert current.preflight_checked_at is not None
+        assert current.preflight_result == {"summary": "stale"}
+        assert current.preflight_revision == 0
+        assert revision == 0
         current.preflight_status = "PASSED"
         current.preflight_result = {"summary": "fresh"}
         session.commit()
@@ -517,6 +530,7 @@ def test_manual_preflight_persists_invalidation_before_recheck(db):
 
     assert result.preflight_status == "PASSED"
     assert result.preflight_result == {"summary": "fresh"}
+    assert result.preflight_revision == 0
 
 
 def test_manual_preflight_missing_plan_is_404(db):
@@ -525,6 +539,19 @@ def test_manual_preflight_missing_plan_is_404(db):
         release_api.preflight_plan(999, db, plan.creator)
     assert error.value.status_code == 404
     assert len(error.value.detail) <= 20
+
+
+def test_manual_preflight_rejects_running_plan_without_network(db):
+    plan, _ = persist_plan(db)
+    plan.status = "RUNNING"
+    db.commit()
+
+    with patch.object(release_api, "run_release_preflight") as preflight:
+        with pytest.raises(HTTPException) as error:
+            release_api.preflight_plan(plan.id, db, plan.creator)
+
+    assert error.value.status_code == 409
+    preflight.assert_not_called()
 
 
 @pytest.mark.parametrize("status", ["UNCHECKED", "FAILED"])
@@ -602,22 +629,29 @@ def test_trigger_atomic_claim_rechecks_preflight_before_side_effects(db):
     assert background_tasks.tasks == []
 
 
-def test_scheduler_failures_do_not_run_preflight(db):
+def test_scheduler_failures_happen_only_after_preflight(db):
     plan, server = persist_plan(db)
     user = plan.creator
     job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
+    preflight_calls = []
+
+    def pass_preflight(session, current, revision=None):
+        preflight_calls.append(current.id)
+        current.preflight_status = "PASSED"
+        session.commit()
+        return current
 
     with (
         patch.object(release_api, "validate_release_plan_input"),
         patch.object(scheduler_manager, "add_release_job", side_effect=RuntimeError("down")),
         patch.object(scheduler_manager, "remove_release_job"),
-        patch.object(release_api, "run_release_preflight", create=True) as preflight,
+        patch.object(release_api, "run_release_preflight", pass_preflight, create=True),
     ):
         with pytest.raises(HTTPException):
             release_api.create_plan(
                 api_request(), scheduled_input(job), BackgroundTasks(), db, user
             )
-        assert preflight.call_count == 0
+        assert len(preflight_calls) == 1
 
     plan.type = "SCHEDULED"
     plan.execute_time = datetime.now() + timedelta(minutes=20)
@@ -627,7 +661,7 @@ def test_scheduler_failures_do_not_run_preflight(db):
         patch.object(release_api, "validate_release_plan_input"),
         patch.object(scheduler_manager, "remove_release_job"),
         patch.object(scheduler_manager, "add_release_job", side_effect=RuntimeError("down")),
-        patch.object(release_api, "run_release_preflight", create=True) as preflight,
+        patch.object(release_api, "run_release_preflight", pass_preflight, create=True),
     ):
         with pytest.raises(HTTPException):
             release_api.update_plan(
@@ -637,7 +671,7 @@ def test_scheduler_failures_do_not_run_preflight(db):
                 db,
                 user,
             )
-        assert preflight.call_count == 0
+        assert len(preflight_calls) == 2
 
 
 def test_run_release_preflight_passes_and_caches_server_reads(db, monkeypatch):
@@ -674,7 +708,65 @@ def test_cross_scheme_canonical_redirect_fails_origin(db, monkeypatch):
     result = release_preflight.run_release_preflight(db, plan)
 
     assert result.preflight_status == "FAILED"
-    assert result.preflight_result["tasks"][0]["checks"][0]["code"] == "origin"
+    assert result.preflight_result["tasks"][0]["checks"][0] == {
+        "code": "origin",
+        "status": "FAILED",
+        "message": "Jenkins Origin 不一致",
+    }
+
+
+def test_canonical_redirect_without_location_fails_origin(db, monkeypatch):
+    plan, _ = persist_plan(db)
+
+    def responder(url):
+        if url.endswith("api/json?tree=url"):
+            return FakeResponse(payload={"url": "http://jenkins.example/"})
+        return FakeResponse(status_code=302)
+
+    install_client(monkeypatch, responder)
+    result = release_preflight.run_release_preflight(db, plan)
+
+    assert result.preflight_status == "FAILED"
+    assert result.preflight_result["tasks"][0]["checks"][0]["status"] == "FAILED"
+
+
+def test_scheduler_activation_rejects_incomplete_or_stale_preflight(db):
+    plan, _ = persist_plan(db)
+    plan.type = "SCHEDULED"
+    plan.preflight_status = "UNCHECKED"
+    plan.preflight_revision = 2
+    plan.tasks[0].scheduled_time = datetime.now() + timedelta(minutes=10)
+    db.commit()
+
+    with patch.object(scheduler_manager, "add_release_job") as add_job:
+        with pytest.raises(HTTPException) as error:
+            release_api._activate_release_jobs(db, plan, 1)
+
+    assert error.value.status_code == 409
+    add_job.assert_not_called()
+
+
+def test_scheduler_activation_cleans_up_if_plan_is_claimed_while_registering(db):
+    plan, _ = persist_plan(db)
+    plan.type = "SCHEDULED"
+    plan.preflight_status = "PASSED"
+    plan.tasks[0].scheduled_time = datetime.now() + timedelta(minutes=10)
+    db.commit()
+
+    def claim_plan(*args, **kwargs):
+        current = db.get(ReleasePlan, plan.id)
+        current.status = "RUNNING"
+        db.commit()
+
+    with (
+        patch.object(scheduler_manager, "add_release_job", side_effect=claim_plan),
+        patch.object(scheduler_manager, "remove_release_job") as remove_job,
+    ):
+        with pytest.raises(HTTPException) as error:
+            release_api._activate_release_jobs(db, plan, plan.preflight_revision)
+
+    assert error.value.status_code == 409
+    remove_job.assert_called_once_with(plan.id, plan.tasks[0].id)
 
 
 def test_timeout_is_warning_without_exception_detail(db, monkeypatch):
@@ -685,6 +777,15 @@ def test_timeout_is_warning_without_exception_detail(db, monkeypatch):
 
     assert result.preflight_status == "WARNING"
     assert "slow" not in json.dumps(result.preflight_result, ensure_ascii=False)
+
+
+def test_ssl_error_is_failed_not_transient_warning(db, monkeypatch):
+    plan, _ = persist_plan(db)
+    install_client(monkeypatch, lambda url: requests.exceptions.SSLError("bad certificate"))
+
+    result = release_preflight.run_release_preflight(db, plan)
+
+    assert result.preflight_status == "FAILED"
 
 
 def test_disabled_server_fails_without_network(db, monkeypatch):
@@ -803,6 +904,67 @@ def test_mixed_task_status_uses_failed_precedence(db, monkeypatch):
     assert result.preflight_status == "FAILED"
 
 
+def test_unexpected_task_error_is_captured_and_other_tasks_continue(db, monkeypatch):
+    plan, _ = persist_plan(db, jobs=("broken", "healthy"))
+
+    def responder(url):
+        if "/job/broken/" in url:
+            raise RuntimeError("secret failure")
+        return successful_response(url)
+
+    client = install_client(monkeypatch, responder)
+    result = release_preflight.run_release_preflight(db, plan)
+
+    assert result.preflight_status == "FAILED"
+    assert [item["status"] for item in result.preflight_result["tasks"]] == ["FAILED", "PASSED"]
+    assert "secret" not in json.dumps(result.preflight_result, ensure_ascii=False)
+    assert any("/job/healthy/" in url for url, _ in client.calls)
+
+
+def test_preflight_runs_job_checks_with_bounded_concurrency(db, monkeypatch):
+    plan, _ = persist_plan(db, jobs=tuple(f"deploy-{index}" for index in range(20)))
+    lock = threading.Lock()
+    running = 0
+    peak = 0
+
+    def responder(url):
+        nonlocal running, peak
+        if "/job/" not in url:
+            return successful_response(url)
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.02)
+        with lock:
+            running -= 1
+        return successful_response(url)
+
+    install_client(monkeypatch, responder)
+    result = release_preflight.run_release_preflight(db, plan)
+
+    assert result.preflight_status == "PASSED"
+    assert 1 < peak <= release_preflight.PREFLIGHT_WORKERS
+
+
+def test_preflight_deadline_returns_complete_warning_result(db, monkeypatch):
+    plan, _ = persist_plan(db, jobs=("slow-one", "slow-two"))
+
+    def responder(url):
+        time.sleep(0.05)
+        return successful_response(url)
+
+    install_client(monkeypatch, responder)
+    monkeypatch.setattr(release_preflight, "PREFLIGHT_DEADLINE_SECONDS", 0)
+    started = time.monotonic()
+
+    result = release_preflight.run_release_preflight(db, plan)
+
+    assert time.monotonic() - started < 0.2
+    assert result.preflight_status == "WARNING"
+    assert len(result.preflight_result["tasks"]) == 2
+    assert all(task["status"] == "WARNING" for task in result.preflight_result["tasks"])
+
+
 def test_second_preflight_replaces_previous_result(db, monkeypatch):
     plan, _ = persist_plan(db)
     state = {"job_status": 200}
@@ -826,6 +988,40 @@ def test_second_preflight_replaces_previous_result(db, monkeypatch):
     assert len(result.preflight_result["tasks"]) == 1
 
 
+def test_stale_preflight_cannot_overwrite_newer_revision(db, monkeypatch):
+    plan, _ = persist_plan(db)
+    plan.preflight_status = "PASSED"
+    plan.preflight_result = {"summary": "last completed"}
+    db.commit()
+    original_revision = plan.preflight_revision
+
+    real_wait = release_preflight.wait
+    waits = 0
+
+    def racing_wait(*args, **kwargs):
+        nonlocal waits
+        completed = real_wait(*args, **kwargs)
+        waits += 1
+        if waits == 2:
+            db.query(ReleasePlan).filter(ReleasePlan.id == plan.id).update(
+                {
+                    ReleasePlan.preflight_revision: original_revision + 1,
+                    ReleasePlan.preflight_status: "UNCHECKED",
+                },
+                synchronize_session=False,
+            )
+            db.commit()
+        return completed
+
+    install_client(monkeypatch, successful_response)
+    monkeypatch.setattr(release_preflight, "wait", racing_wait)
+    result = release_preflight.run_release_preflight(db, plan, original_revision)
+
+    assert result.preflight_revision == original_revision + 1
+    assert result.preflight_status == "UNCHECKED"
+    assert result.preflight_result == {"summary": "last completed"}
+
+
 def test_upgrade_adds_release_plan_preflight_columns():
     engine = create_engine("sqlite://")
     with engine.begin() as connection:
@@ -834,7 +1030,7 @@ def test_upgrade_adds_release_plan_preflight_columns():
     ensure_release_plan_preflight_columns(engine)
 
     columns = {column["name"] for column in inspect(engine).get_columns("release_plan")}
-    assert {"preflight_status", "preflight_checked_at", "preflight_result"} <= columns
+    assert {"preflight_status", "preflight_checked_at", "preflight_result", "preflight_revision"} <= columns
 
 
 def test_release_plan_preflight_defaults_are_serializable():
@@ -857,3 +1053,4 @@ def test_release_plan_preflight_defaults_are_serializable():
     assert response.preflight_status == "UNCHECKED"
     assert response.preflight_checked_at is None
     assert response.preflight_result is None
+    assert response.preflight_revision == 0
