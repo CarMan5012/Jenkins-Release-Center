@@ -44,7 +44,7 @@ def test_aggregate_status_uses_highest_severity():
     [("UNCHECKED", True), ("FAILED", True), ("PASSED", False), ("WARNING", False)],
 )
 def test_preflight_block_reason_only_blocks_unchecked_and_failed(status, blocked):
-    reason = preflight_block_reason(status)
+    reason = preflight_block_reason(ReleasePlan(preflight_status=status))
     assert bool(reason) is blocked
     if reason:
         assert len(reason) <= 20
@@ -70,11 +70,11 @@ def db():
         yield session
 
 
-def persist_plan(db, jobs=("deploy",), parameters=None, active=1):
+def persist_plan(db, jobs=("deploy",), parameters=None, active=1, server_url="http://jenkins.example/"):
     user = User(username="tester", password_hash="hash")
     server = JenkinsServer(
         name="jenkins",
-        url="http://jenkins.example/",
+        url=server_url,
         username="ci",
         api_token="encrypted",
         is_active=active,
@@ -227,6 +227,43 @@ def test_job_http_failure_status(db, monkeypatch, status_code, expected):
     assert release_preflight.run_release_preflight(db, plan).preflight_status == expected
 
 
+def test_empty_job_json_is_failed(db, monkeypatch):
+    plan, _ = persist_plan(db)
+
+    def responder(url):
+        if "/job/" in url:
+            return FakeResponse(payload={})
+        return successful_response(url)
+
+    install_client(monkeypatch, responder)
+    result = release_preflight.run_release_preflight(db, plan)
+
+    assert result.preflight_status == "FAILED"
+    assert result.preflight_result["tasks"][0]["checks"][-1]["code"] == "job"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [requests.exceptions.InvalidURL("bad"), requests.exceptions.InvalidSchema("bad")],
+)
+def test_non_transient_request_error_is_failed(db, monkeypatch, error):
+    plan, _ = persist_plan(db)
+    install_client(monkeypatch, lambda url: error)
+
+    assert release_preflight.run_release_preflight(db, plan).preflight_status == "FAILED"
+
+
+def test_invalid_configured_origin_fails_before_network(db, monkeypatch):
+    plan, _ = persist_plan(db, server_url="ftp://jenkins.example/")
+    client = install_client(monkeypatch, successful_response)
+
+    result = release_preflight.run_release_preflight(db, plan)
+
+    assert result.preflight_status == "FAILED"
+    assert result.preflight_result["tasks"][0]["checks"][0]["code"] == "origin"
+    assert client.calls == []
+
+
 def test_unknown_persisted_parameter_fails(db, monkeypatch):
     plan, _ = persist_plan(db, parameters={"deploy": {"MISSING": "x"}})
     install_client(monkeypatch, successful_response)
@@ -276,7 +313,10 @@ def test_second_preflight_replaces_previous_result(db, monkeypatch):
 
     def responder(url):
         if "/job/" in url:
-            return FakeResponse(status_code=state["job_status"], payload={"property": [], "actions": []})
+            return FakeResponse(
+                status_code=state["job_status"],
+                payload={"name": "deploy", "property": [], "actions": []},
+            )
         return successful_response(url)
 
     install_client(monkeypatch, responder)

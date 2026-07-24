@@ -25,8 +25,8 @@ def aggregate_status(statuses) -> str:
     return max(statuses, key=SEVERITY.get, default="PASSED")
 
 
-def preflight_block_reason(status: str) -> str | None:
-    return {"UNCHECKED": "发布计划尚未检查", "FAILED": "发布前检查未通过"}.get(status)
+def preflight_block_reason(plan: ReleasePlan) -> str | None:
+    return {"UNCHECKED": "发布计划尚未检查", "FAILED": "发布前检查未通过"}.get(plan.preflight_status)
 
 
 def _check(code: str, status: str, message: str) -> dict:
@@ -34,6 +34,10 @@ def _check(code: str, status: str, message: str) -> dict:
 
 
 def _server_probe(client: JenkinsClient) -> dict:
+    try:
+        configured = url_origin(client.base_url)
+    except ValueError:
+        return _check("origin", "FAILED", "Jenkins Origin 无效")
     try:
         root = client.session.get(
             urljoin(client.base_url, "api/json?tree=url"),
@@ -48,7 +52,7 @@ def _server_probe(client: JenkinsClient) -> dict:
     except (requests.Timeout, requests.ConnectionError):
         return _check("connection", "WARNING", "Jenkins 暂时无法连接")
     except requests.RequestException:
-        return _check("connection", "WARNING", "Jenkins 请求失败")
+        return _check("connection", "FAILED", "Jenkins 请求无效")
 
     if root.status_code in {401, 403} or canonical.status_code in {401, 403}:
         return _check("auth", "FAILED", "Jenkins 认证失败")
@@ -58,7 +62,6 @@ def _server_probe(client: JenkinsClient) -> dict:
         return _check("connection", "FAILED", "Jenkins 根地址不可用")
 
     try:
-        configured = url_origin(client.base_url)
         payload = root.json()
         if not isinstance(payload, dict) or url_origin(payload.get("url", "")) != configured:
             raise ValueError("Origin mismatch")
@@ -106,7 +109,7 @@ def _job_checks(client: JenkinsClient, task) -> list[dict]:
     except (requests.Timeout, requests.ConnectionError):
         return [_check("job", "WARNING", "Jenkins 任务暂时无法连接")]
     except requests.RequestException:
-        return [_check("job", "WARNING", "Jenkins 任务请求失败")]
+        return [_check("job", "FAILED", "Jenkins 任务请求无效")]
 
     if response.status_code in {401, 403}:
         return [_check("auth", "FAILED", "Jenkins 认证失败")]
@@ -118,7 +121,10 @@ def _job_checks(client: JenkinsClient, task) -> list[dict]:
         return [_check("job", "FAILED", "Jenkins 任务不可用")]
 
     try:
-        names = _parameter_names(response.json())
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("name"), str) or not payload["name"]:
+            raise ValueError
+        names = _parameter_names(payload)
     except (TypeError, ValueError):
         return [_check("job", "FAILED", "Jenkins 任务数据无效")]
     unknown = set(task.parameters or {}) - names
