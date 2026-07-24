@@ -11,6 +11,7 @@ from app.models.jenkins import JenkinsJob
 from app.models.user import User
 from app.schemas.release import ReleasePlanCreate, ReleasePlanResponse, ReleasePlanUpdate
 from app.services.scheduler import scheduler_manager
+from app.services.release_preflight import preflight_block_reason, run_release_preflight
 from app.services.release_service import execute_release_task
 
 from app.services.deps_helper import get_client_ip, normalize_idempotency_key
@@ -241,6 +242,7 @@ def create_plan(
             db.commit()
             raise HTTPException(status_code=503, detail=f"注册发布排程失败: {error}")
                 
+    plan = run_release_preflight(db, plan)
     log_action(db, current_user, "CREATE_RELEASE_PLAN", get_client_ip(request), f"Created release plan: {plan.name}")
     return plan
 
@@ -269,6 +271,22 @@ def get_plan(
     if not plan:
         raise HTTPException(status_code=404, detail="未找到该发布计划")
     return plan
+
+@router.post("/plans/{plan_id}/preflight", response_model=ReleasePlanResponse)
+def preflight_plan(
+    plan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_operator),
+):
+    plan = db.execute(
+        select(ReleasePlan).filter(ReleasePlan.id == plan_id).options(
+            selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
+        )
+    ).scalars().first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="发布计划不存在")
+    return run_release_preflight(db, plan)
+
 
 @router.post("/plans/{plan_id}/cancel")
 def cancel_plan(
@@ -337,6 +355,10 @@ def trigger_plan_immediately(
         raise HTTPException(status_code=400, detail="只有等待执行状态的计划才可以被提早运行")
         
     # 校验任务绑定的 Jenkins 实例是否被禁用
+    reason = preflight_block_reason(plan)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
     from app.models.jenkins import JenkinsServer
     for t in plan.tasks:
         server = db.get(JenkinsServer, t.server_id)
@@ -424,6 +446,10 @@ def update_plan(
     if plan.status != "WAITING":
         raise HTTPException(status_code=400, detail="只有等待执行状态的计划才可以被修改")
         
+    plan.preflight_status = "UNCHECKED"
+    plan.preflight_checked_at = None
+    plan.preflight_result = None
+
     # 3. Cleanup existing scheduler registrations
     for t in plan.tasks:
         scheduler_manager.remove_release_job(plan.id, t.id)
@@ -528,7 +554,8 @@ def update_plan(
     )
     res = db.execute(stmt)
     plan = res.scalars().first()
-    
+
+    plan = run_release_preflight(db, plan)
     log_action(db, current_user, "UPDATE_RELEASE_PLAN", get_client_ip(request), f"Updated release plan: {plan.name}")
     return plan
 

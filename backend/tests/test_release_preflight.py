@@ -1,18 +1,23 @@
 import json
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 import requests
+from fastapi import BackgroundTasks, HTTPException, Request
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
 
+from app.api import release as release_api
 from app.core.database import Base
 from app.models.jenkins import JenkinsJob, JenkinsServer
 from app.models.release import ReleasePlan, ReleaseTask
 from app.models.user import User
-from app.schemas.release import ReleasePlanResponse
+from app.schemas.release import ReleasePlanCreate, ReleasePlanResponse, ReleaseTaskCreate
 from app.services.init_db import ensure_release_plan_preflight_columns
 from app.services import release_preflight
 from app.services.release_preflight import aggregate_status, preflight_block_reason, url_origin
+from app.services.scheduler import scheduler_manager
 
 
 @pytest.mark.parametrize(
@@ -142,6 +147,192 @@ def successful_response(url):
             "actions": [{"parameterDefinitions": [{"name": "TAG"}]}],
         }
     )
+
+
+def api_request(method="POST", path="/plans"):
+    return Request({
+        "type": "http",
+        "method": method,
+        "path": path,
+        "headers": [],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+    })
+
+
+def scheduled_input(job, name="scheduled release"):
+    return ReleasePlanCreate(
+        name=name,
+        type="SCHEDULED",
+        execute_time=datetime.now() + timedelta(minutes=10),
+        tasks=[ReleaseTaskCreate(
+            server_id=job.server_id,
+            job_id=job.id,
+            job_name=job.name,
+            branch="main",
+            sequence=0,
+        )],
+    )
+
+
+def test_create_runs_preflight_after_plan_and_tasks_are_persisted(db):
+    existing, server = persist_plan(db)
+    user = existing.creator
+    job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
+    seen = []
+
+    def fake_preflight(session, plan):
+        seen.append((plan.id, [task.id for task in plan.tasks]))
+        plan.preflight_status = "PASSED"
+        return plan
+
+    with (
+        patch.object(release_api, "validate_release_plan_input"),
+        patch.object(scheduler_manager, "add_release_job"),
+        patch.object(release_api, "run_release_preflight", fake_preflight, create=True),
+    ):
+        result = release_api.create_plan(
+            api_request(), scheduled_input(job), BackgroundTasks(), db, user
+        )
+
+    assert seen == [(result.id, [result.tasks[0].id])]
+    assert result.preflight_status == "PASSED"
+
+
+def test_update_resets_and_runs_preflight_after_scheduler_success(db):
+    plan, server = persist_plan(db)
+    user = plan.creator
+    job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
+    plan.preflight_status = "FAILED"
+    plan.preflight_checked_at = datetime.now()
+    plan.preflight_result = {"stale": True}
+    db.commit()
+    seen = []
+
+    def fake_preflight(session, updated):
+        assert updated.preflight_status == "UNCHECKED"
+        assert updated.preflight_checked_at is None
+        assert updated.preflight_result is None
+        seen.append(updated.id)
+        updated.preflight_status = "PASSED"
+        return updated
+
+    with (
+        patch.object(release_api, "validate_release_plan_input"),
+        patch.object(scheduler_manager, "remove_release_job"),
+        patch.object(scheduler_manager, "add_release_job"),
+        patch.object(release_api, "run_release_preflight", fake_preflight, create=True),
+    ):
+        result = release_api.update_plan(
+            api_request("PUT", f"/plans/{plan.id}"),
+            plan.id,
+            scheduled_input(job, "replacement"),
+            db,
+            user,
+        )
+
+    assert seen == [plan.id]
+    assert result.preflight_status == "PASSED"
+
+
+def test_manual_preflight_returns_result_and_missing_plan_is_404(db):
+    plan, _ = persist_plan(db)
+    plan.preflight_status = "WARNING"
+    plan.preflight_result = {"summary": "persisted"}
+    db.commit()
+
+    with patch.object(
+        release_api, "run_release_preflight", return_value=plan, create=True
+    ) as preflight:
+        result = release_api.preflight_plan(plan.id, db, plan.creator)
+
+    assert result.preflight_result == {"summary": "persisted"}
+    preflight.assert_called_once_with(db, result)
+
+    with pytest.raises(HTTPException) as error:
+        release_api.preflight_plan(999, db, plan.creator)
+    assert error.value.status_code == 404
+    assert len(error.value.detail) <= 20
+
+
+@pytest.mark.parametrize("status", ["UNCHECKED", "FAILED"])
+def test_trigger_blocks_failed_preflight_before_scheduler_mutation(db, status):
+    plan, _ = persist_plan(db)
+    plan.preflight_status = status
+    db.commit()
+
+    with patch.object(scheduler_manager, "remove_release_job") as remove_job:
+        with pytest.raises(HTTPException) as error:
+            release_api.trigger_plan_immediately(
+                api_request(path=f"/plans/{plan.id}/trigger"),
+                plan.id,
+                BackgroundTasks(),
+                db,
+                plan.creator,
+            )
+
+    assert error.value.status_code == 400
+    assert error.value.detail == preflight_block_reason(plan)
+    remove_job.assert_not_called()
+    assert db.get(ReleasePlan, plan.id).status == "WAITING"
+
+
+def test_trigger_allows_warning_preflight(db):
+    plan, _ = persist_plan(db)
+    plan.preflight_status = "WARNING"
+    db.commit()
+
+    with patch.object(scheduler_manager, "remove_release_job") as remove_job:
+        result = release_api.trigger_plan_immediately(
+            api_request(path=f"/plans/{plan.id}/trigger"),
+            plan.id,
+            BackgroundTasks(),
+            db,
+            plan.creator,
+        )
+
+    assert result["success"] is True
+    remove_job.assert_called_once()
+
+
+def test_scheduler_failures_do_not_run_preflight(db):
+    plan, server = persist_plan(db)
+    user = plan.creator
+    job = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id).first()
+
+    with (
+        patch.object(release_api, "validate_release_plan_input"),
+        patch.object(scheduler_manager, "add_release_job", side_effect=RuntimeError("down")),
+        patch.object(scheduler_manager, "remove_release_job"),
+        patch.object(release_api, "run_release_preflight", create=True) as preflight,
+    ):
+        with pytest.raises(HTTPException):
+            release_api.create_plan(
+                api_request(), scheduled_input(job), BackgroundTasks(), db, user
+            )
+        assert preflight.call_count == 0
+
+    plan.type = "SCHEDULED"
+    plan.execute_time = datetime.now() + timedelta(minutes=20)
+    plan.tasks[0].scheduled_time = plan.execute_time
+    db.commit()
+    with (
+        patch.object(release_api, "validate_release_plan_input"),
+        patch.object(scheduler_manager, "remove_release_job"),
+        patch.object(scheduler_manager, "add_release_job", side_effect=RuntimeError("down")),
+        patch.object(release_api, "run_release_preflight", create=True) as preflight,
+    ):
+        with pytest.raises(HTTPException):
+            release_api.update_plan(
+                api_request("PUT", f"/plans/{plan.id}"),
+                plan.id,
+                scheduled_input(job),
+                db,
+                user,
+            )
+        assert preflight.call_count == 0
 
 
 def test_run_release_preflight_passes_and_caches_server_reads(db, monkeypatch):
