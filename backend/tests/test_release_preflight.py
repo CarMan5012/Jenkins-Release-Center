@@ -495,20 +495,32 @@ def test_update_resets_and_runs_preflight_after_scheduler_success(db):
     assert result.preflight_status == "PASSED"
 
 
-def test_manual_preflight_returns_result_and_missing_plan_is_404(db):
+def test_manual_preflight_persists_invalidation_before_recheck(db):
     plan, _ = persist_plan(db)
-    plan.preflight_status = "WARNING"
-    plan.preflight_result = {"summary": "persisted"}
+    plan.preflight_status = "PASSED"
+    plan.preflight_checked_at = datetime.now()
+    plan.preflight_result = {"summary": "stale"}
     db.commit()
 
-    with patch.object(
-        release_api, "run_release_preflight", return_value=plan, create=True
-    ) as preflight:
+    def fake_preflight(session, current):
+        session.expire(current)
+        assert current.preflight_status == "UNCHECKED"
+        assert current.preflight_checked_at is None
+        assert current.preflight_result is None
+        current.preflight_status = "PASSED"
+        current.preflight_result = {"summary": "fresh"}
+        session.commit()
+        return current
+
+    with patch.object(release_api, "run_release_preflight", fake_preflight):
         result = release_api.preflight_plan(plan.id, db, plan.creator)
 
-    assert result.preflight_result == {"summary": "persisted"}
-    preflight.assert_called_once_with(db, result)
+    assert result.preflight_status == "PASSED"
+    assert result.preflight_result == {"summary": "fresh"}
 
+
+def test_manual_preflight_missing_plan_is_404(db):
+    plan, _ = persist_plan(db)
     with pytest.raises(HTTPException) as error:
         release_api.preflight_plan(999, db, plan.creator)
     assert error.value.status_code == 404

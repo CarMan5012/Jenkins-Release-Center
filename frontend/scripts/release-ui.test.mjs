@@ -37,6 +37,12 @@ for (const viewSource of [releaseViewSource, detailSource, dashboardSource]) {
 assert.match(releaseViewSource, /<PreflightResult/);
 assert.match(detailSource, /<PreflightResult/);
 assert.match(jenkinsSource, /response\.data\.preflight_status/);
+assert.match(releaseViewSource, /:disabled="[^"]*busyKey === `preflight-\$\{plan\.id\}`/);
+assert.match(releaseViewSource, /function triggerPlan\(plan: ReleasePlan\)[\s\S]*?busyKey\.value === `preflight-\$\{plan\.id\}`/);
+assert.match(detailSource, /const preflightLoading = ref\(false\)/);
+assert.match(detailSource, /:disabled="[^"]*preflightLoading/);
+assert.match(detailSource, /function triggerPlan\(\)[\s\S]*?preflightLoading\.value/);
+assert.match(jenkinsSource, /runModalVisible\.value = false;[\s\S]*?router\.push\(`\/release\/\$\{response\.data\.id\}`\)/);
 
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: {

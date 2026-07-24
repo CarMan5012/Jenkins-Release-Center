@@ -297,6 +297,10 @@ def preflight_plan(
     ).scalars().first()
     if not plan:
         raise HTTPException(status_code=404, detail="发布计划不存在")
+    plan.preflight_status = "UNCHECKED"
+    plan.preflight_checked_at = None
+    plan.preflight_result = None
+    db.commit()
     return run_release_preflight(db, plan)
 
 

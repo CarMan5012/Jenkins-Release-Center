@@ -7,8 +7,8 @@
       </div>
       <div class="header-actions">
         <n-button secondary @click="router.push('/release')">返回列表</n-button>
-        <n-button secondary :disabled="!plan" :loading="busyKey === 'preflight'" @click="preflightPlan">发布前检查</n-button>
-        <n-button type="primary" :disabled="plan?.status !== 'WAITING' || isPreflightBlocked(plan?.preflight_status)" :title="isPreflightBlocked(plan?.preflight_status) ? '请先完成并通过发布前检查' : undefined" :loading="busyKey === 'run'" @click="triggerPlan">运行</n-button>
+        <n-button secondary :disabled="!plan" :loading="preflightLoading" @click="preflightPlan">发布前检查</n-button>
+        <n-button type="primary" :disabled="plan?.status !== 'WAITING' || preflightLoading || isPreflightBlocked(plan?.preflight_status)" :title="isPreflightBlocked(plan?.preflight_status) ? '请先完成并通过发布前检查' : undefined" :loading="busyKey === 'run'" @click="triggerPlan">运行</n-button>
         <n-button type="warning" secondary :disabled="!plan || !['WAITING', 'RUNNING'].includes(plan.status)" :loading="busyKey === 'stop'" @click="cancelPlan">停止</n-button>
       </div>
     </div>
@@ -285,6 +285,7 @@ const loading = ref(true);
 const historyLoading = ref(false);
 const syncingTaskId = ref<number | null>(null);
 const busyKey = ref('');
+const preflightLoading = ref(false);
 const error = ref('');
 const plan = ref<ReleasePlan | null>(null);
 const histories = ref<ReleaseHistory[]>([]);
@@ -396,6 +397,7 @@ async function runAction(key: string, action: () => Promise<void>) {
 
 function triggerPlan() {
   if (!plan.value) return;
+  if (preflightLoading.value) return;
   if (isPreflightBlocked(plan.value.preflight_status)) {
     message.warning('请先完成并通过发布前检查。');
     return;
@@ -419,7 +421,7 @@ function triggerPlan() {
 
 async function preflightPlan() {
   if (!plan.value) return;
-  busyKey.value = 'preflight';
+  preflightLoading.value = true;
   try {
     const response = await request.post(`/release/plans/${plan.value?.id}/preflight`);
     plan.value = response.data;
@@ -427,7 +429,7 @@ async function preflightPlan() {
   } catch (err: any) {
     message.error(err.message || '发布前检查失败。');
   } finally {
-    busyKey.value = '';
+    preflightLoading.value = false;
   }
 }
 

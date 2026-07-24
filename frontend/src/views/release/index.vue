@@ -64,7 +64,7 @@
               <td class="mono">{{ plan.tasks?.length || 0 }}</td>
               <td>
                 <div class="cell-actions">
-                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status !== 'WAITING' || isPreflightBlocked(plan.preflight_status)" :title="isPreflightBlocked(plan.preflight_status) ? '请先完成并通过发布前检查' : undefined" @click="triggerPlan(plan)">运行</n-button>
+                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status !== 'WAITING' || busyKey === `preflight-${plan.id}` || isPreflightBlocked(plan.preflight_status)" :title="isPreflightBlocked(plan.preflight_status) ? '请先完成并通过发布前检查' : undefined" @click="triggerPlan(plan)">运行</n-button>
                   <n-button size="tiny" secondary :loading="busyKey === `preflight-${plan.id}`" @click="preflightPlan(plan)">发布前检查</n-button>
                   <n-button size="tiny" type="warning" secondary :loading="busyKey === `cancel-${plan.id}`" :disabled="!['WAITING', 'RUNNING'].includes(plan.status)" @click="cancelPlan(plan)">停止</n-button>
                   <n-button size="tiny" secondary :loading="busyKey === `retry-${plan.id}`" :disabled="['WAITING', 'RUNNING'].includes(plan.status)" @click="retryPlan(plan)">重试</n-button>
@@ -369,6 +369,7 @@ async function runAction(key: string, action: () => Promise<void>) {
 }
 
 function triggerPlan(plan: ReleasePlan) {
+  if (busyKey.value === `preflight-${plan.id}`) return;
   if (isPreflightBlocked(plan.preflight_status)) {
     message.warning('请先完成并通过发布前检查。');
     return;

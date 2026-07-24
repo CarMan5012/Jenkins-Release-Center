@@ -498,12 +498,14 @@ async function submitQuickRun() {
       }],
     });
     const status = response.data.preflight_status;
-    if (isPreflightBlocked(status)) {
-      message.error('计划已创建，但发布前检查未通过，请到发布计划页面处理');
-      return;
-    }
-    if (status === 'WARNING') {
-      message.warning('计划已创建，预检存在警告，请到发布计划页面确认后运行');
+    if (isPreflightBlocked(status) || status === 'WARNING') {
+      runModalVisible.value = false;
+      await router.push(`/release/${response.data.id}`);
+      if (isPreflightBlocked(status)) {
+        message.error('计划已创建，但发布前检查未通过，请到发布计划页面处理');
+      } else {
+        message.warning('计划已创建，预检存在警告，请到发布计划页面确认后运行');
+      }
       return;
     }
     message.success('已创建立即执行任务。');
