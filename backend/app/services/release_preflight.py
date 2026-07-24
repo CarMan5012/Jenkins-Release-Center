@@ -26,7 +26,9 @@ def aggregate_status(statuses) -> str:
 
 
 def preflight_block_reason(plan: ReleasePlan) -> str | None:
-    return {"UNCHECKED": "发布计划尚未检查", "FAILED": "发布前检查未通过"}.get(plan.preflight_status)
+    if plan.preflight_status in {"PASSED", "WARNING"}:
+        return None
+    return {"UNCHECKED": "发布计划尚未检查", "FAILED": "发布前检查未通过"}.get(plan.preflight_status, "发布前检查状态异常")
 
 
 def _check(code: str, status: str, message: str) -> dict:

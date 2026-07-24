@@ -1,5 +1,5 @@
 <template>
-  <n-card size="small" title="发布前检查" aria-label="发布前检查结果">
+  <n-card size="small" title="发布前检查" role="region" aria-label="发布前检查结果">
     <template v-if="result">
       <p v-if="result.summary">{{ result.summary }}</p>
       <p class="muted mono">检查时间：{{ formatDateTime(checkedAt) }}</p>

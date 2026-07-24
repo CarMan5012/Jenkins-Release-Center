@@ -67,7 +67,7 @@ assert.equal(isPreflightBlocked('UNCHECKED'), true);
 assert.equal(isPreflightBlocked('FAILED'), true);
 assert.equal(isPreflightBlocked('WARNING'), false);
 assert.equal(isPreflightBlocked('PASSED'), false);
-assert.equal(isPreflightBlocked('UNKNOWN'), false);
+assert.equal(isPreflightBlocked('UNKNOWN'), true);
 assert.equal(formatDuration(65), '1m 5s');
 assert.equal(formatDuration(null), '-');
 

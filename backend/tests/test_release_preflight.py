@@ -46,13 +46,17 @@ def test_aggregate_status_uses_highest_severity():
 
 @pytest.mark.parametrize(
     ("status", "blocked"),
-    [("UNCHECKED", True), ("FAILED", True), ("PASSED", False), ("WARNING", False)],
+    [("UNCHECKED", True), ("FAILED", True), ("UNKNOWN", True), ("PASSED", False), ("WARNING", False)],
 )
-def test_preflight_block_reason_only_blocks_unchecked_and_failed(status, blocked):
+def test_preflight_block_reason_only_allows_passed_and_warning(status, blocked):
     reason = preflight_block_reason(ReleasePlan(preflight_status=status))
     assert bool(reason) is blocked
     if reason:
         assert len(reason) <= 20
+
+
+def test_preflight_block_reason_fails_closed_for_unknown_status():
+    assert preflight_block_reason(ReleasePlan(preflight_status="UNKNOWN")) == "发布前检查状态异常"
 
 
 class FakeResponse:

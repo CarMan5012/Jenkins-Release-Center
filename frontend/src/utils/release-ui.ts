@@ -46,7 +46,7 @@ export function getPreflightMeta(status?: string | null): StatusMeta {
 }
 
 export function isPreflightBlocked(status?: string | null): boolean {
-  return !status || status === 'UNCHECKED' || status === 'FAILED';
+  return status !== 'PASSED' && status !== 'WARNING';
 }
 
 export function formatPlanType(type?: string | null): string {
