@@ -365,22 +365,27 @@ def trigger_plan_immediately(
         if server and not server.is_active:
             raise HTTPException(status_code=400, detail=f"无法运行发布计划，任务绑定的 Jenkins 实例 [{server.name}] 已被禁用")
 
-    # Remove all scheduling entries
-    for t in plan.tasks:
-        scheduler_manager.remove_release_job(plan.id, t.id)
-        
     from sqlalchemy import update
     stmt_up = (
         update(ReleasePlan)
-        .where(ReleasePlan.id == plan_id, ReleasePlan.status == "WAITING")
+        .where(
+            ReleasePlan.id == plan_id,
+            ReleasePlan.status == "WAITING",
+            ReleasePlan.preflight_status.in_(("PASSED", "WARNING")),
+        )
         .values(status="RUNNING")
     )
     res_up = db.execute(stmt_up)
-    db.commit()
-    if res_up.rowcount == 0:
+    if res_up.rowcount != 1:
+        db.rollback()
+        db.refresh(plan)
         raise HTTPException(status_code=409, detail="发布计划已经被其他线程领取运行")
-        
+    db.commit()
     db.refresh(plan)
+
+    # Remove all scheduling entries
+    for t in plan.tasks:
+        scheduler_manager.remove_release_job(plan.id, t.id)
 
     # Launch execution asynchronously
     if plan.type == "PIPELINE":

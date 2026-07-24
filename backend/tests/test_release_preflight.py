@@ -297,6 +297,41 @@ def test_trigger_allows_warning_preflight(db):
     remove_job.assert_called_once()
 
 
+def test_trigger_atomic_claim_rechecks_preflight_before_side_effects(db):
+    plan, _ = persist_plan(db)
+    plan.preflight_status = "WARNING"
+    db.commit()
+    background_tasks = BackgroundTasks()
+
+    def fail_preflight_during_claim(current):
+        current.preflight_status = "FAILED"
+        db.commit()
+
+    with (
+        patch.object(
+            release_api,
+            "preflight_block_reason",
+            side_effect=fail_preflight_during_claim,
+        ),
+        patch.object(scheduler_manager, "remove_release_job") as remove_job,
+    ):
+        with pytest.raises(HTTPException) as error:
+            release_api.trigger_plan_immediately(
+                api_request(path=f"/plans/{plan.id}/trigger"),
+                plan.id,
+                background_tasks,
+                db,
+                plan.creator,
+            )
+
+    db.refresh(plan)
+    assert error.value.status_code == 409
+    assert plan.status == "WAITING"
+    assert plan.preflight_status == "FAILED"
+    remove_job.assert_not_called()
+    assert background_tasks.tasks == []
+
+
 def test_scheduler_failures_do_not_run_preflight(db):
     plan, server = persist_plan(db)
     user = plan.creator
