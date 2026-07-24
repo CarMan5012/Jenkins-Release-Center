@@ -6,6 +6,22 @@ from loguru import logger
 
 from sqlalchemy import inspect, text
 
+
+def ensure_release_plan_preflight_columns(engine) -> None:
+    inspector = inspect(engine)
+    if "release_plan" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("release_plan")}
+    definitions = {
+        "preflight_status": "VARCHAR(20) NOT NULL DEFAULT 'UNCHECKED'",
+        "preflight_checked_at": "DATETIME NULL",
+        "preflight_result": "JSON NULL",
+    }
+    with engine.begin() as connection:
+        for name, definition in definitions.items():
+            if name not in columns:
+                connection.execute(text(f"ALTER TABLE release_plan ADD COLUMN {name} {definition}"))
+
 def init_db() -> None:
     # 1. Create tables if they do not exist
     logger.info("Initializing database tables...")
@@ -14,6 +30,7 @@ def init_db() -> None:
         # here we create only our application tables.
         # APScheduler table is automatically created by SQLAlchemyJobStore on start.
         Base.metadata.create_all(bind=sync_engine)
+        ensure_release_plan_preflight_columns(sync_engine)
         logger.info("Database tables created or verified.")
 
         if sync_engine.dialect.name == "mysql":
