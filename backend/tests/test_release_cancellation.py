@@ -46,6 +46,7 @@ def session_with_running_task():
         name="release",
         type="IMMEDIATE",
         status="RUNNING",
+        preflight_status="PASSED",
         creator_id=user.id,
     )
     db.add(plan)

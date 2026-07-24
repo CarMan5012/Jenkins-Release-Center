@@ -142,6 +142,26 @@ def test_execute_release_task_blocks_invalid_persisted_preflight(
     assert db.get(ReleasePlan, plan.id).status == "FAILED"
 
 
+def test_execute_release_task_blocks_every_waiting_pipeline_task(db, monkeypatch):
+    plan, _ = persist_plan(db, jobs=("root", "dependent"))
+    root, dependent = sorted(plan.tasks, key=lambda task: task.sequence)
+    plan.type = "PIPELINE"
+    plan.preflight_status = "FAILED"
+    dependent.depends_on_task_id = root.id
+    db.commit()
+    monkeypatch.setattr(release_service, "SyncSessionLocal", lambda: Session(db.bind))
+
+    with patch.object(release_service.threading, "Thread") as thread:
+        release_service.execute_release_task(plan.id, root.id)
+
+    db.expire_all()
+    tasks = db.query(ReleaseTask).filter(ReleaseTask.plan_id == plan.id).all()
+    thread.assert_not_called()
+    assert {task.status for task in tasks} == {"FAILED"}
+    assert {task.error_message for task in tasks} == {preflight_block_reason(plan)}
+    assert all(task.finished_at is not None for task in tasks)
+
+
 @pytest.mark.parametrize("preflight_status", ["PASSED", "WARNING"])
 def test_execute_release_task_allows_valid_persisted_preflight(
     db, monkeypatch, preflight_status
@@ -161,7 +181,39 @@ def test_execute_release_task_allows_valid_persisted_preflight(
     thread.return_value.start.assert_called_once_with()
 
 
-@pytest.mark.parametrize("case", ["missing_plan", "missing_task", "non_waiting"])
+@pytest.mark.parametrize("case", ["missing_plan", "other_plan"])
+def test_execute_release_task_checks_ownership_before_mutation(db, monkeypatch, case):
+    plan, _ = persist_plan(db)
+    task = plan.tasks[0]
+    if case == "other_plan":
+        other_plan = ReleasePlan(
+            name="other",
+            type="IMMEDIATE",
+            interval_minutes=0,
+            pipeline_failure_strategy="STOP",
+            status="WAITING",
+            creator_id=plan.creator_id,
+            preflight_status="FAILED",
+        )
+        db.add(other_plan)
+        db.commit()
+        plan_id = other_plan.id
+    else:
+        plan_id = 999
+    monkeypatch.setattr(release_service, "SyncSessionLocal", lambda: Session(db.bind))
+
+    with patch.object(release_service.threading, "Thread") as thread:
+        release_service.execute_release_task(plan_id, task.id)
+
+    db.expire_all()
+    unchanged_task = db.get(ReleaseTask, task.id)
+    thread.assert_not_called()
+    assert unchanged_task.status == "WAITING"
+    assert unchanged_task.error_message is None
+    assert unchanged_task.finished_at is None
+
+
+@pytest.mark.parametrize("case", ["missing_task", "non_waiting"])
 def test_execute_release_task_does_not_start_inappropriate_work(db, monkeypatch, case):
     plan, _ = persist_plan(db)
     task = plan.tasks[0]
@@ -170,13 +222,36 @@ def test_execute_release_task_does_not_start_inappropriate_work(db, monkeypatch,
         task.status = "SUCCESS"
     db.commit()
     monkeypatch.setattr(release_service, "SyncSessionLocal", lambda: Session(db.bind))
-    plan_id = 999 if case == "missing_plan" else plan.id
     task_id = 999 if case == "missing_task" else task.id
 
     with patch.object(release_service.threading, "Thread") as thread:
-        release_service.execute_release_task(plan_id, task_id)
+        release_service.execute_release_task(plan.id, task_id)
 
     thread.assert_not_called()
+
+
+@pytest.mark.parametrize("preflight_status", ["FAILED", "UNCHECKED"])
+def test_execute_task_workflow_claim_rechecks_preflight_atomically(
+    db, monkeypatch, preflight_status
+):
+    plan, _ = persist_plan(db)
+    task = plan.tasks[0]
+    plan.preflight_status = preflight_status
+    db.commit()
+    monkeypatch.setattr(release_service, "SyncSessionLocal", lambda: Session(db.bind))
+
+    with (
+        patch.object(release_service, "send_release_notification") as notification,
+        patch.object(
+            release_service, "JenkinsClient", side_effect=RuntimeError("must not connect")
+        ) as client,
+    ):
+        release_service.execute_task_workflow(plan.id, task.id)
+
+    db.expire_all()
+    notification.assert_not_called()
+    client.assert_not_called()
+    assert db.get(ReleaseTask, task.id).status == "WAITING"
 
 
 def install_client(monkeypatch, responder):
