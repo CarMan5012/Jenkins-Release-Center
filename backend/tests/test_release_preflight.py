@@ -15,7 +15,7 @@ from app.models.release import ReleasePlan, ReleaseTask
 from app.models.user import User
 from app.schemas.release import ReleasePlanCreate, ReleasePlanResponse, ReleaseTaskCreate
 from app.services.init_db import ensure_release_plan_preflight_columns
-from app.services import release_preflight
+from app.services import release_preflight, release_service
 from app.services.release_preflight import aggregate_status, preflight_block_reason, url_origin
 from app.services.scheduler import scheduler_manager
 
@@ -114,6 +114,69 @@ def persist_plan(db, jobs=("deploy",), parameters=None, active=1, server_url="ht
     db.commit()
     db.refresh(plan)
     return plan, server
+
+
+@pytest.mark.parametrize(
+    ("preflight_status", "plan_status"),
+    [("FAILED", "WAITING"), ("UNCHECKED", "RUNNING")],
+)
+def test_execute_release_task_blocks_invalid_persisted_preflight(
+    db, monkeypatch, preflight_status, plan_status
+):
+    plan, _ = persist_plan(db)
+    task = plan.tasks[0]
+    plan.preflight_status = preflight_status
+    plan.status = plan_status
+    db.commit()
+    monkeypatch.setattr(release_service, "SyncSessionLocal", lambda: Session(db.bind))
+
+    with patch.object(release_service.threading, "Thread") as thread:
+        release_service.execute_release_task(plan.id, task.id)
+
+    db.expire_all()
+    blocked_task = db.get(ReleaseTask, task.id)
+    thread.assert_not_called()
+    assert blocked_task.status == "FAILED"
+    assert blocked_task.error_message == preflight_block_reason(db.get(ReleasePlan, plan.id))
+    assert blocked_task.finished_at is not None
+    assert db.get(ReleasePlan, plan.id).status == "FAILED"
+
+
+@pytest.mark.parametrize("preflight_status", ["PASSED", "WARNING"])
+def test_execute_release_task_allows_valid_persisted_preflight(
+    db, monkeypatch, preflight_status
+):
+    plan, _ = persist_plan(db)
+    task = plan.tasks[0]
+    plan.preflight_status = preflight_status
+    db.commit()
+    monkeypatch.setattr(release_service, "SyncSessionLocal", lambda: Session(db.bind))
+
+    with patch.object(release_service.threading, "Thread") as thread:
+        release_service.execute_release_task(plan.id, task.id)
+
+    thread.assert_called_once_with(
+        target=release_service.execute_task_workflow, args=(plan.id, task.id)
+    )
+    thread.return_value.start.assert_called_once_with()
+
+
+@pytest.mark.parametrize("case", ["missing_plan", "missing_task", "non_waiting"])
+def test_execute_release_task_does_not_start_inappropriate_work(db, monkeypatch, case):
+    plan, _ = persist_plan(db)
+    task = plan.tasks[0]
+    plan.preflight_status = "PASSED"
+    if case == "non_waiting":
+        task.status = "SUCCESS"
+    db.commit()
+    monkeypatch.setattr(release_service, "SyncSessionLocal", lambda: Session(db.bind))
+    plan_id = 999 if case == "missing_plan" else plan.id
+    task_id = 999 if case == "missing_task" else task.id
+
+    with patch.object(release_service.threading, "Thread") as thread:
+        release_service.execute_release_task(plan_id, task_id)
+
+    thread.assert_not_called()
 
 
 def install_client(monkeypatch, responder):

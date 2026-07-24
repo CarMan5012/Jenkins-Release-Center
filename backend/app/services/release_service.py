@@ -10,6 +10,7 @@ from app.models.release import ReleasePlan, ReleaseTask, ReleaseHistory
 from app.models.jenkins import JenkinsServer, JenkinsJob
 from app.services.jenkins_client import JenkinsClient
 from app.services.notification import send_release_notification
+from app.services.release_preflight import preflight_block_reason
 
 def execute_release_task(plan_id: int, task_id: int):
     """
@@ -17,6 +18,27 @@ def execute_release_task(plan_id: int, task_id: int):
     Runs inside background scheduler threads.
     """
     logger.info(f"APScheduler trigger: Plan {plan_id}, Task {task_id}")
+    db: Session = SyncSessionLocal()
+    try:
+        plan = db.query(ReleasePlan).filter(ReleasePlan.id == plan_id).first()
+        task = db.query(ReleaseTask).filter(ReleaseTask.id == task_id).first()
+        reason = preflight_block_reason(plan) if plan else "发布计划不存在"
+        if reason:
+            if task and task.status == "WAITING":
+                task.status = "FAILED"
+                task.error_message = reason
+                task.finished_at = datetime.now()
+            if plan and plan.status in ["WAITING", "RUNNING"]:
+                plan.status = "FAILED"
+            db.commit()
+            logger.warning(f"Release task blocked: {reason}")
+            return
+        if not task or task.plan_id != plan_id or task.status != "WAITING":
+            logger.warning(f"Task {task_id} is missing or no longer waiting. Skipping execution.")
+            return
+    finally:
+        db.close()
+
     # Spawn a separate thread to handle long running polls so APScheduler thread pool is not blocked
     t = threading.Thread(target=execute_task_workflow, args=(plan_id, task_id))
     t.start()
