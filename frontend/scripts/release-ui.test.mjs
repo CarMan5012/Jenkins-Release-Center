@@ -17,6 +17,15 @@ const configSource = fs.readFileSync(new URL('../src/views/config/index.vue', im
 
 assert.match(releaseViewSource, /const wizardForm = ref\(\{\s*name: '',\s*type: 'SCHEDULED'/);
 assert.match(releaseViewSource, /function openCreateWizard\(\)[\s\S]*?wizardForm\.value = \{\s*name: '',\s*type: 'SCHEDULED'/);
+assert.match(releaseViewSource, /placeholder="请选择分支（也可手动输入）"/);
+assert.match(releaseViewSource, /'未获取到分支列表，可手动输入分支或 Tag。'/);
+assert.doesNotMatch(releaseViewSource, /const first = taskBranchOptions/);
+assert.match(releaseViewSource, /servers = ref<Array<\{ id: number; name: string; is_active: number \}>>/);
+assert.match(releaseViewSource, /if \(server && !server\.is_active\)[\s\S]*?message\.warning\('该 Jenkins 实例已被禁用，请先启用后再选择。'\)[\s\S]*?task\.server_id = null;[\s\S]*?return;/);
+assert.match(releaseViewSource, /err\.response\?\.data\?\.detail \|\| '未获取到分支列表，可手动输入分支或 Tag。'/);
+assert.match(releaseViewSource, /@click="setQuickExecuteTime\(21, 30\)"[^>]*>21:30<\/n-button>/);
+assert.match(releaseViewSource, /@click="setQuickExecuteTime\(22, 0\)"[^>]*>22:00<\/n-button>/);
+assert.match(releaseViewSource, /function setQuickExecuteTime\(hour: number, minute: number\)/);
 assert.match(configSource, /v-model:value="planRetention"/);
 assert.match(configSource, /config_key: 'plan_retention_days'/);
 assert.match(configSource, /const planRetention = ref<number \| null>\(30\)/);
@@ -63,6 +72,7 @@ const {
   getPreflightMeta,
   isPreflightBlocked,
   formatDuration,
+  getQuickExecuteTime,
   filterPlans,
   sortPlans,
 } = module.exports;
@@ -88,6 +98,20 @@ assert.equal(isPreflightBlocked('PASSED'), false);
 assert.equal(isPreflightBlocked('UNKNOWN'), true);
 assert.equal(formatDuration(65), '1m 5s');
 assert.equal(formatDuration(null), '-');
+
+const quickTimeNow = new Date(2026, 6, 27, 21, 45).getTime();
+assert.equal(
+  getQuickExecuteTime(null, 22, 0, quickTimeNow),
+  new Date(2026, 6, 27, 22, 0).getTime(),
+);
+assert.equal(
+  getQuickExecuteTime(null, 21, 30, quickTimeNow),
+  new Date(2026, 6, 28, 21, 30).getTime(),
+);
+assert.equal(
+  getQuickExecuteTime(new Date(2026, 6, 30, 8, 15).getTime(), 21, 30, quickTimeNow),
+  new Date(2026, 6, 30, 21, 30).getTime(),
+);
 
 const plans = [
   { name: 'api-prod', status: 'FAILED', type: 'PIPELINE', created_at: '2026-07-09T02:00:00Z' },

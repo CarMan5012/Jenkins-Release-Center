@@ -98,7 +98,14 @@
             <n-select v-model:value="wizardForm.type" :options="typeOptions.filter((item) => item.value !== 'ALL')" />
           </n-form-item>
           <n-form-item v-if="wizardForm.type !== 'IMMEDIATE'" label="调度时间" required>
-            <n-date-picker v-model:value="wizardForm.execute_time" type="datetime" clearable style="width: 100%" />
+            <div class="schedule-time-control">
+              <n-date-picker v-model:value="wizardForm.execute_time" type="datetime" clearable style="width: 100%" />
+              <div class="quick-time-buttons">
+                <span class="muted">快捷选择</span>
+                <n-button size="small" secondary @click="setQuickExecuteTime(21, 30)">21:30</n-button>
+                <n-button size="small" secondary @click="setQuickExecuteTime(22, 0)">22:00</n-button>
+              </div>
+            </div>
           </n-form-item>
           <n-form-item v-if="wizardForm.type === 'BATCH'" label="批次间隔">
             <n-input-number v-model:value="wizardForm.interval_minutes" :min="1" style="width: 180px" />
@@ -119,7 +126,7 @@
             <n-select v-model:value="task.server_id" :options="serverOptions" placeholder="Jenkins 实例" @update:value="(value) => onTaskServerChange(Number(value), index)" />
             <n-select v-model:value="task.view_id" :options="taskViewOptions[index] || []" placeholder="View" @update:value="(value) => onTaskViewChange(Number(value), index)" />
             <n-select v-model:value="task.job_id" :options="taskJobOptions[index] || []" placeholder="Job" @update:value="(value) => onTaskJobChange(Number(value), index)" />
-            <n-select v-model:value="task.branch" :options="taskBranchOptions[index] || []" placeholder="分支/Tag" filterable tag />
+            <n-select v-model:value="task.branch" :options="taskBranchOptions[index] || []" placeholder="请选择分支（也可手动输入）" filterable tag />
           </div>
         </div>
         <n-button dashed block type="primary" @click="addTaskRow">添加任务</n-button>
@@ -198,7 +205,7 @@ import PreflightResult from '../../components/PreflightResult.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
 import request from '../../utils/request';
-import { filterPlans, formatDateTime, formatPlanType, getPreflightMeta, isPreflightBlocked, sortPlans, getWeekDay } from '../../utils/release-ui';
+import { filterPlans, formatDateTime, formatPlanType, getPreflightMeta, getQuickExecuteTime, isPreflightBlocked, sortPlans, getWeekDay } from '../../utils/release-ui';
 import type { PreflightStatus } from '../../utils/release-ui';
 
 type SelectOption = { label: string; value: number | string };
@@ -250,7 +257,7 @@ const btnRefreshLoading = ref(false);
 const error = ref('');
 const busyKey = ref('');
 const plans = ref<ReleasePlan[]>([]);
-const servers = ref<Array<{ id: number; name: string }>>([]);
+const servers = ref<Array<{ id: number; name: string; is_active: number }>>([]);
 const keyword = ref('');
 const statusFilter = ref('ALL');
 const typeFilter = ref('ALL');
@@ -322,6 +329,10 @@ function emptyTask(): ReleaseTask {
     branch: '',
     depends_on_task_id: null,
   };
+}
+
+function setQuickExecuteTime(hour: number, minute: number) {
+  wizardForm.value.execute_time = getQuickExecuteTime(wizardForm.value.execute_time, hour, minute);
 }
 
 async function loadPlans(trigger?: 'page' | 'refresh') {
@@ -591,8 +602,9 @@ async function loadTaskBranches(serverId: number, jobId: number, index: number) 
   try {
     const res = await request.get(`/jenkins/servers/${serverId}/jobs/${jobId}/branches`);
     taskBranchOptions.value[index] = (res.data || []).map((branch: string) => ({ label: branch, value: branch }));
-  } catch {
+  } catch (err: any) {
     taskBranchOptions.value[index] = [];
+    message.warning(err.response?.data?.detail || '未获取到分支列表，可手动输入分支或 Tag。');
   }
 }
 
@@ -604,6 +616,12 @@ async function onTaskServerChange(value: number, index: number) {
   taskViewOptions.value[index] = [];
   taskJobOptions.value[index] = [];
   taskBranchOptions.value[index] = [];
+  const server = servers.value.find((item) => item.id === value);
+  if (server && !server.is_active) {
+    message.warning('该 Jenkins 实例已被禁用，请先启用后再选择。');
+    task.server_id = null;
+    return;
+  }
   if (value) await loadTaskViews(value, index);
 }
 
@@ -630,8 +648,6 @@ async function onTaskJobChange(value: number, index: number) {
   
   if (task.server_id && value) {
     await loadTaskBranches(task.server_id, value, index);
-    const first = taskBranchOptions.value[index]?.[0]?.value;
-    if (typeof first === 'string') task.branch = first;
   }
 }
 
@@ -712,6 +728,17 @@ onMounted(async () => {
 .task-editor {
   display: grid;
   gap: 16px;
+}
+
+.schedule-time-control {
+  width: 100%;
+}
+
+.quick-time-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .task-row {

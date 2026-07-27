@@ -1,10 +1,11 @@
 import json
 import zipfile
 import pytest
+from fastapi import HTTPException
 from unittest.mock import patch, MagicMock
 
 from app.api.deps import get_current_active_admin
-from app.api.jenkins import read_backup_details, router
+from app.api.jenkins import get_git_branches, read_backup_details, router
 from app.services.jenkins_client import JenkinsClient
 
 @patch('requests.Session.get')
@@ -180,3 +181,19 @@ def test_get_branches_and_tags_list_json_response(mock_get):
     branches = client.get_branches_and_tags("my-job")
     assert "origin/master" in branches
     assert "origin/dev" in branches
+
+
+@patch('app.api.jenkins.JenkinsClient')
+def test_get_git_branches_rejects_inactive_server(mock_client):
+    server = MagicMock(is_active=0)
+    job = MagicMock(name="frontend-deploy")
+    db = MagicMock()
+    db.get.side_effect = [server, job]
+
+    with pytest.raises(HTTPException) as exc_info:
+        get_git_branches(1, 2, db)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "该 Jenkins 实例已被禁用，无法获取分支信息"
+    mock_client.assert_not_called()
+    db.query.assert_not_called()

@@ -154,3 +154,15 @@ export function formatTriggerBy(trigger?: string | null): string {
   
   return val;
 }
+
+export function getQuickExecuteTime(
+  currentValue: number | null,
+  hour: number,
+  minute: number,
+  now = Date.now(),
+): number {
+  const value = new Date(currentValue ?? now);
+  value.setHours(hour, minute, 0, 0);
+  if (currentValue == null && value.getTime() <= now) value.setDate(value.getDate() + 1);
+  return value.getTime();
+}
