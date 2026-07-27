@@ -532,6 +532,28 @@ def test_manual_preflight_keeps_last_complete_result_while_rechecking(db):
     assert result.preflight_revision == 0
 
 
+def test_manual_preflight_rechecks_failed_plan(db, monkeypatch):
+    plan, _ = persist_plan(db)
+    previous_check = datetime(2026, 1, 1)
+    plan.status = "FAILED"
+    plan.preflight_status = "FAILED"
+    plan.preflight_checked_at = previous_check
+    plan.preflight_result = {"summary": "stale"}
+    for task in plan.tasks:
+        task.status = "FAILED"
+        task.error_message = "old failure"
+    db.commit()
+    install_client(monkeypatch, successful_response)
+
+    result = release_api.preflight_plan(plan.id, db, plan.creator)
+
+    assert result.preflight_status == "PASSED"
+    assert result.preflight_checked_at > previous_check
+    assert result.status == "WAITING"
+    assert all(task.status == "WAITING" for task in result.tasks)
+    assert all(task.error_message is None for task in result.tasks)
+
+
 def test_manual_preflight_missing_plan_is_404(db):
     plan, _ = persist_plan(db)
     with pytest.raises(HTTPException) as error:
@@ -690,9 +712,22 @@ def test_run_release_preflight_passes_and_caches_server_reads(db, monkeypatch):
     assert all(task["status"] == "PASSED" for task in result.preflight_result["tasks"])
     urls = [url for url, _ in client.calls]
     assert urls.count("http://jenkins.example/api/json?tree=url") == 1
-    assert urls.count("http://jenkins.example") == 1
+    assert urls.count("http://jenkins.example/") == 1
     assert any("job/folder/job/deploy%20one/api/json" in url for url in urls)
     assert all(kwargs == {"timeout": 10, "allow_redirects": False} for _, kwargs in client.calls)
+
+
+def test_server_probe_preserves_trailing_slash_to_avoid_proxy_redirect(monkeypatch):
+    def responder(url):
+        if url.endswith("api/json?tree=url"):
+            return FakeResponse(payload={"url": "https://jenkins.example/"})
+        if url == "https://jenkins.example/":
+            return FakeResponse()
+        return FakeResponse(status_code=301, headers={"Location": "http://jenkins.example/"})
+
+    client = install_client(monkeypatch, responder)
+
+    assert release_preflight._server_probe(client("https://jenkins.example/", "ci", "token"))["status"] == "PASSED"
 
 
 def test_cross_scheme_canonical_redirect_fails_origin(db, monkeypatch):

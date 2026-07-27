@@ -23,23 +23,24 @@ class SchedulerManager:
             from app.services.jenkins_sync_task import sync_external_builds
             self.scheduler.add_job(
                 sync_external_builds,
-                'interval',
-                minutes=2,
+                'cron',
+                hour=18,
+                minute=0,
                 id="sync_external_builds",
                 replace_existing=True
             )
-            logger.info("Registered sync_external_builds background task.")
+            logger.info("Registered sync_external_builds daily 18:00 cron task.")
             
-            # Register interval job to reconcile running release tasks (every 30 minutes)
+            # Register interval job to reconcile running release tasks (every 10 seconds)
             from app.services.release_service import reconcile_running_tasks
             self.scheduler.add_job(
                 reconcile_running_tasks,
                 'interval',
-                minutes=30,
+                seconds=10,
                 id="reconcile_running_tasks",
                 replace_existing=True
             )
-            logger.info("Registered reconcile_running_tasks background task.")
+            logger.info("Registered reconcile_running_tasks background task (10s interval).")
             
             # Register cron job to clean up expired data daily at 3:00 AM
             from app.services.data_cleaner import clean_expired_data

@@ -234,8 +234,10 @@ def validate_release_plan_input(db: Session, plan_in: ReleasePlanCreate):
         if not job:
             raise HTTPException(status_code=400, detail="Jenkins 任务不存在或归属关系错误")
             
-        # 校验 job_name 是否一致（若客户端提交了且非空）
-        if task_in.job_name and task_in.job_name != job.name:
+        # 校验或自动补齐 job_name
+        if not task_in.job_name:
+            task_in.job_name = job.name
+        elif task_in.job_name != job.name:
             raise HTTPException(status_code=400, detail=f"提交的任务名称 [{task_in.job_name}] 与系统真实名称 [{job.name}] 不一致")
             
         # 校验 job 实例是否激活
@@ -429,7 +431,28 @@ def list_plans(
         selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
     ).order_by(ReleasePlan.created_at.desc())
     res = db.execute(stmt)
-    return res.scalars().all()
+    plans = res.scalars().all()
+    
+    from app.services.release_service import reconcile_single_task, check_and_finalize_plan
+    any_updated = False
+    for plan in plans:
+        has_active_tasks = any(t.status in ["QUEUED", "BUILDING", "RUNNING"] for t in plan.tasks)
+        if plan.status == "RUNNING" or has_active_tasks:
+            for t in plan.tasks:
+                if t.status in ["QUEUED", "BUILDING", "RUNNING"]:
+                    try:
+                        if reconcile_single_task(db, t.id):
+                            any_updated = True
+                    except Exception:
+                        pass
+            check_and_finalize_plan(db, plan.id)
+            any_updated = True
+            
+    if any_updated:
+        db.expire_all()
+        plans = db.execute(stmt).scalars().all()
+        
+    return plans
 
 @router.get("/plans/{plan_id}", response_model=ReleasePlanResponse)
 def get_plan(
@@ -444,6 +467,20 @@ def get_plan(
     plan = res.scalars().first()
     if not plan:
         raise HTTPException(status_code=404, detail="未找到该发布计划")
+
+    from app.services.release_service import reconcile_single_task, check_and_finalize_plan
+    has_active_tasks = any(t.status in ["QUEUED", "BUILDING", "RUNNING"] for t in plan.tasks)
+    if plan.status == "RUNNING" or has_active_tasks:
+        for t in plan.tasks:
+            if t.status in ["QUEUED", "BUILDING", "RUNNING"]:
+                try:
+                    reconcile_single_task(db, t.id)
+                except Exception:
+                    pass
+        check_and_finalize_plan(db, plan.id)
+        db.expire_all()
+        plan = db.execute(stmt).scalars().first()
+
     return plan
 
 @router.post("/plans/{plan_id}/preflight", response_model=ReleasePlanResponse)
@@ -459,8 +496,17 @@ def preflight_plan(
     ).scalars().first()
     if not plan:
         raise HTTPException(status_code=404, detail="发布计划不存在")
-    if plan.status != "WAITING" or any(task.status != "WAITING" for task in plan.tasks):
+    if plan.status == "RUNNING":
         raise HTTPException(status_code=409, detail="发布计划状态已变化")
+        
+    if plan.status == "FAILED":
+        plan.status = "WAITING"
+        for t in plan.tasks:
+            if t.status == "FAILED":
+                t.status = "WAITING"
+                t.error_message = None
+        db.commit()
+        db.refresh(plan)
     return _run_preflight_safely(db, plan, plan.preflight_revision)
 
 
@@ -479,30 +525,38 @@ def cancel_plan(
     if not plan:
         raise HTTPException(status_code=404, detail="未找到该发布计划")
         
-    if plan.status in ["SUCCESS", "FAILED", "CANCELLED"]:
-        raise HTTPException(status_code=400, detail="无法停止已经结束的发布计划")
+    if plan.status not in ("WAITING", "RUNNING"):
+        raise HTTPException(status_code=400, detail="只能停止等待中或运行中的发布计划")
         
     from app.models.jenkins import JenkinsServer
     from app.services.jenkins_client import JenkinsClient
 
     # Stop remote builds before reporting local cancellation success.
     for t in plan.tasks:
-        if t.status == "RUNNING" and t.build_number:
+        if t.status in ("WAITING", "QUEUED", "BUILDING", "RUNNING"):
             server = db.get(JenkinsServer, t.server_id)
-            if not server:
-                raise HTTPException(status_code=409, detail="关联的 Jenkins 实例不存在，无法停止远端构建")
-            try:
-                JenkinsClient(server.url, server.username, server.api_token).stop_build(
-                    t.job_name,
-                    t.build_number,
-                )
-            except Exception as error:
-                raise HTTPException(status_code=502, detail=f"停止 Jenkins 构建失败: {error}")
+            if server:
+                client = JenkinsClient(server.url, server.username, server.api_token)
+                # 1. 尝试停止记录在案的构建号
+                if t.build_number:
+                    try:
+                        client.stop_build(t.job_name, t.build_number)
+                    except Exception as error:
+                        logger.warning(f"停止记录的 Jenkins 构建 #{t.build_number} 失败: {error}")
+                # 2. 终极自愈保护：扫描并强行终止 Jenkins 端该 Job 上正在运行的真实活跃构建 (防构建号错位卡死)
+                try:
+                    recent = client.get_recent_builds(t.job_name, limit=5)
+                    for b in recent:
+                        if b.get("status") == "BUILDING":
+                            try:
+                                client.stop_build(t.job_name, b["number"])
+                                logger.info(f"强行停止 Jenkins 上真实的活跃构建 #{b['number']}")
+                            except Exception:
+                                pass
+                except Exception as scan_err:
+                    logger.warning(f"扫描真实活跃构建失败: {scan_err}")
 
-    # Remove from APScheduler
-    for t in plan.tasks:
-        scheduler_manager.remove_release_job(plan.id, t.id)
-        if t.status in ["WAITING", "RUNNING"]:
+            scheduler_manager.remove_release_job(plan.id, t.id)
             t.status = "CANCELLED"
             t.finished_at = datetime.now()
             
@@ -527,10 +581,9 @@ def trigger_plan_immediately(
     if not plan:
         raise HTTPException(status_code=404, detail="未找到该发布计划")
         
-    if plan.status != "WAITING":
-        raise HTTPException(status_code=400, detail="只有等待执行状态的计划才可以被提早运行")
+    if plan.status == "RUNNING":
+        raise HTTPException(status_code=400, detail="正在运行中的计划无法重复运行")
         
-    # 校验任务绑定的 Jenkins 实例是否被禁用
     reason = preflight_block_reason(plan)
     if reason:
         raise HTTPException(status_code=400, detail=reason)
@@ -545,7 +598,6 @@ def trigger_plan_immediately(
         update(ReleasePlan)
         .where(
             ReleasePlan.id == plan_id,
-            ReleasePlan.status == "WAITING",
             ReleasePlan.preflight_status.in_(("PASSED", "WARNING")),
             ReleasePlan.preflight_revision == plan.preflight_revision,
         )
@@ -555,7 +607,12 @@ def trigger_plan_immediately(
     if res_up.rowcount != 1:
         db.rollback()
         db.refresh(plan)
-        raise HTTPException(status_code=409, detail="发布计划已经被其他线程领取运行")
+        raise HTTPException(status_code=409, detail="发布计划状态已变化")
+
+    for t in plan.tasks:
+        if t.status != "RUNNING":
+            t.status = "WAITING"
+            t.error_message = None
     db.commit()
     db.refresh(plan)
 
@@ -574,6 +631,102 @@ def trigger_plan_immediately(
             
     log_action(db, current_user, "TRIGGER_RELEASE_PLAN", get_client_ip(request), f"Triggered release plan early: {plan.name}")
     return {"success": True, "message": "发布计划已成功提早运行"}
+
+@router.post("/plans/{plan_id}/retry")
+def retry_plan_immediately(
+    request: Request,
+    plan_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_operator)
+):
+    stmt = select(ReleasePlan).filter(ReleasePlan.id == plan_id).options(
+        selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
+    )
+    res = db.execute(stmt)
+    plan = res.scalars().first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="未找到该发布计划")
+        
+    if plan.status == "RUNNING":
+        raise HTTPException(status_code=400, detail="正在运行中的计划无法重复触发重试")
+        
+    reason = preflight_block_reason(plan)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    from app.models.jenkins import JenkinsServer
+    for t in plan.tasks:
+        server = db.get(JenkinsServer, t.server_id)
+        if server and not server.is_active:
+            raise HTTPException(status_code=400, detail=f"无法运行发布计划，任务绑定的 Jenkins 实例 [{server.name}] 已被禁用")
+
+    plan.status = "RUNNING"
+    db.commit()
+    db.refresh(plan)
+
+    for t in plan.tasks:
+        scheduler_manager.remove_release_job(plan.id, t.id)
+
+    if plan.type == "PIPELINE":
+        first_task = next((t for t in plan.tasks if t.sequence == 0), None)
+        if first_task:
+            background_tasks.add_task(execute_release_task, plan.id, first_task.id)
+    else:
+        for t in plan.tasks:
+            background_tasks.add_task(execute_release_task, plan.id, t.id)
+            
+    log_action(db, current_user, "RETRY_RELEASE_PLAN", get_client_ip(request), f"Retried release plan in-place: {plan.name}")
+    return {"success": True, "message": "发布计划已原地重新触发执行", "id": plan.id}
+
+@router.post("/plans/{plan_id}/tasks/{task_id}/retry")
+def retry_single_task(
+    request: Request,
+    plan_id: int,
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_operator)
+):
+    stmt = select(ReleasePlan).filter(ReleasePlan.id == plan_id).options(
+        selectinload(ReleasePlan.tasks).selectinload(ReleaseTask.job)
+    )
+    res = db.execute(stmt)
+    plan = res.scalars().first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="未找到该发布计划")
+
+    task = next((t for t in plan.tasks if t.id == task_id), None)
+    if not task:
+        raise HTTPException(status_code=404, detail="未找到该发布任务")
+
+    if task.status in ("QUEUED", "BUILDING", "RUNNING"):
+        raise HTTPException(status_code=400, detail="该任务正在运行中，无法重复重试")
+
+    reason = preflight_block_reason(plan)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    from app.models.jenkins import JenkinsServer
+    server = db.get(JenkinsServer, task.server_id)
+    if server and not server.is_active:
+        raise HTTPException(status_code=400, detail=f"无法运行重试，任务绑定的 Jenkins 实例 [{server.name}] 已被禁用")
+
+    # 重置该 Task 的状态
+    task.status = "WAITING"
+    task.error_message = None
+    task.finished_at = None
+    plan.status = "RUNNING"
+    db.commit()
+
+    # 移除可能存在的定时调度项
+    scheduler_manager.remove_release_job(plan.id, task.id)
+
+    # 提交给后台异步调度单独执行该 Task
+    background_tasks.add_task(execute_release_task, plan.id, task.id)
+
+    log_action(db, current_user, "RETRY_SINGLE_TASK", get_client_ip(request), f"Retried single task {task.job_name} in plan #{plan_id}")
+    return {"success": True, "message": f"任务 [{task.job_name}] 已重置并重新触发执行", "task_id": task.id}
 
 @router.delete("/plans/{plan_id}")
 def delete_plan(
@@ -778,40 +931,15 @@ def sync_task_status_manually(
     if not task:
         raise HTTPException(status_code=404, detail="未找到该发布任务")
     
-    if not task.build_number:
-        raise HTTPException(status_code=400, detail="该任务在 Jenkins 上尚未被触发，无法同步")
-
-    # Execute reconciliation
+    # Execute reconciliation (now supports recovering missing build_number)
     updated = reconcile_single_task(db, task.id)
-    if updated:
-        return {"success": True, "message": "任务状态已成功同步并更新"}
+    if updated or task.build_number:
+        db.refresh(task)
+        return {
+            "success": True, 
+            "message": f"任务状态同步成功（构建号: #{task.build_number}，状态: {task.status}）",
+            "status": task.status,
+            "build_number": task.build_number
+        }
     
-    # If not updated (e.g., still building or already matching status), return status detail
-    try:
-        server = db.query(JenkinsServer).filter(JenkinsServer.id == task.server_id).first()
-        if not server:
-            raise HTTPException(status_code=404, detail="未找到关联的 Jenkins 实例")
-            
-        client = JenkinsClient(server.url, server.username, server.api_token)
-        status_info = client.get_build_status(task.job_name, task.build_number)
-        
-        # Translate Jenkins status to Chinese for frontend display
-        jenkins_status = '构建中' if status_info.get('building') else status_info.get('result')
-        if jenkins_status == 'SUCCESS':
-            jenkins_status = '成功'
-        elif jenkins_status == 'FAILURE' or jenkins_status == 'FAILED':
-            jenkins_status = '失败'
-        elif jenkins_status == 'ABORTED':
-            jenkins_status = '已中止'
-            
-        return {
-            "success": True,
-            "message": f"任务状态已同步，本地状态：{task.status}，Jenkins 状态：{jenkins_status}",
-            "building": status_info.get("building", False)
-        }
-    except Exception as e:
-        return {
-            "success": True,
-            "message": f"本地状态为 {task.status}，同步 Jenkins 失败：{str(e)}",
-            "building": task.status == "RUNNING"
-        }
+    raise HTTPException(status_code=400, detail="该任务在 Jenkins 上尚未查询到对应的构建编号，请确认任务是否正常出队")

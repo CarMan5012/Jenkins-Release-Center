@@ -9,7 +9,7 @@ from app.models.release import ReleaseHistory, ReleaseTask
 from app.models.jenkins import JenkinsServer
 from app.schemas.release import ReleaseHistoryResponse, BuildLogResponse
 from app.services.jenkins_client import JenkinsClient
-from app.services.jenkins_sync_task import sync_external_builds
+from app.services.jenkins_sync_task import sync_external_builds, cleanup_all_duplicate_histories
 
 router = APIRouter()
 
@@ -23,6 +23,10 @@ def list_histories(
     limit: int = 20,
     current_user: str = Depends(get_current_user)
 ):
+    # Auto purge duplicates on page 1 fetch for seamless UX
+    if page == 1:
+        cleanup_all_duplicate_histories(db)
+
     offset = (page - 1) * limit
     stmt = db.query(ReleaseHistory).order_by(desc(ReleaseHistory.created_at))
     if job_name:
@@ -102,6 +106,28 @@ def get_history_logs(
     if not history:
         raise HTTPException(status_code=404, detail="未找到该发布历史记录")
         
+    # Lazy-load or stream progressive logs from Jenkins if logs cache is missing or currently BUILDING
+    if not history.logs or history.status == "BUILDING":
+        if history.server_name and history.job_name and history.build_number:
+            server = db.query(JenkinsServer).filter(JenkinsServer.name == history.server_name).first()
+            if server:
+                try:
+                    client = JenkinsClient(server.url, server.username, server.api_token)
+                    log_text, next_start, has_more = client.get_progressive_log(history.job_name, history.build_number, start)
+                    if log_text:
+                        if not history.logs:
+                            history.logs = log_text[:200000]
+                        elif history.status == "BUILDING":
+                            history.logs = (history.logs + log_text)[:200000]
+                        db.commit()
+                    return {
+                        "log_text": log_text,
+                        "next_start": next_start,
+                        "has_more": has_more
+                    }
+                except Exception:
+                    pass
+
     logs_content = history.logs or ""
     sliced_logs = logs_content[start:]
     return {
@@ -112,7 +138,31 @@ def get_history_logs(
 
 @router.post("/sync")
 def sync_external_history(
+    job_name: Optional[str] = None,
+    server_id: Optional[int] = None,
     current_user: str = Depends(get_current_user)
 ):
-    sync_external_builds()
+    sync_external_builds(server_id=server_id, job_name=job_name)
     return {"message": "外部构建记录已成功同步"}
+
+from sqlalchemy import text
+
+@router.post("/reset-sequence")
+def reset_history_sequence(
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user)
+):
+    """
+    Clear all history records and reset the auto-increment ID counter back to 1.
+    """
+    try:
+        db.query(ReleaseHistory).delete()
+        try:
+            db.execute(text("DELETE FROM sqlite_sequence WHERE name='release_history'"))
+        except Exception:
+            pass
+        db.commit()
+        return {"success": True, "message": "历史记录 ID 序号已成功重置，后续新增记录将从 #1 开始计算"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"重置历史记录 ID 失败: {str(e)}")

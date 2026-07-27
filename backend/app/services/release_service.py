@@ -57,37 +57,58 @@ def execute_release_task(plan_id: int, task_id: int):
 def reconcile_single_task(db: Session, task_id: int) -> bool:
     """
     Queries Jenkins to check the current build status of a task and updates db accordingly.
-    Returns True if task has reached a final state and was updated, False if still building or failed to poll.
+    Supports auto-reconciling build_number mismatch and updating final/running states.
     """
     task = db.query(ReleaseTask).filter(ReleaseTask.id == task_id).first()
-    if not task or not task.build_number:
+    if not task:
         return False
-        
-    if task.status in ["SUCCESS", "CANCELLED", "SKIPPED"]:
-        # If the task is in final state, verify if its history matches. If so, skip reconciliation.
-        histories = db.query(ReleaseHistory).filter(
-            ReleaseHistory.task_id == task.id,
-            ReleaseHistory.is_external == False
-        ).all()
-        # Only skip if there is exactly 1 history record and its status matches the task status.
-        # Otherwise (multiple duplicates or inconsistent status), we must run reconciliation to clean/fix.
-        if len(histories) == 1 and histories[0].status == task.status:
-            return False
-        
+
     server = db.query(JenkinsServer).filter(JenkinsServer.id == task.server_id).first()
     if not server:
         logger.error(f"Reconciliation error: Associated Jenkins server for task {task_id} not found.")
         return False
         
+    client = JenkinsClient(server.url, server.username, server.api_token)
+
+    # 1. 尝试从 Jenkins 上拉取最新 5 条构建，进行构建号纠偏校准
     try:
-        client = JenkinsClient(server.url, server.username, server.api_token)
+        recent_builds = client.get_recent_builds(task.job_name, limit=5)
+        if recent_builds:
+            # 优先寻找处于 BUILDING 状态的真实构建号
+            active_buildings = [b for b in recent_builds if b.get("status") == "BUILDING"]
+            if active_buildings:
+                latest_building_num = max(b["number"] for b in active_buildings)
+                if task.build_number != latest_building_num:
+                    logger.info(f"手动同步校准：将任务 {task_id} 构建号由 #{task.build_number} 校准为正在运行的真实号 #{latest_building_num}")
+                    task.build_number = latest_building_num
+                    task.status = "BUILDING"
+                    db.commit()
+            else:
+                latest_num = max(b["number"] for b in recent_builds)
+                if not task.build_number or task.build_number < latest_num:
+                    logger.info(f"手动同步校准：将任务 {task_id} 构建号校准为最新构建号 #{latest_num}")
+                    task.build_number = latest_num
+                    db.commit()
+    except Exception as reconcile_ex:
+        logger.warning(f"手动同步尝试获取近 5 次构建失败: {reconcile_ex}")
+
+    if not task.build_number:
+        return False
+        
+    try:
         status_info = client.get_build_status(task.job_name, task.build_number)
         
         if status_info.get("building") is True:
-            return False
+            task.status = "BUILDING"
+            db.commit()
+            return True
             
         build_result = status_info.get("result")
-        duration = status_info.get("duration", 0)
+        raw_duration = status_info.get("duration", 0)
+        try:
+            duration = int(raw_duration) if raw_duration is not None else 0
+        except (ValueError, TypeError):
+            duration = 0
         
         if build_result:
             task.finished_at = datetime.now()
@@ -100,6 +121,20 @@ def reconcile_single_task(db: Session, task_id: int) -> bool:
                 send_release_notification(task.id, "success")
                 write_history(db, task, "SUCCESS", duration, "SUCCESS", client)
                 handle_pipeline_success(db, task.plan_id, task.id)
+            elif build_result == "UNSTABLE":
+                task.status = "UNSTABLE"
+                task.error_message = "Jenkins Build completed with status: UNSTABLE (Reconciled)"
+                db.commit()
+                send_release_notification(task.id, "failed")
+                write_history(db, task, "UNSTABLE", duration, "UNSTABLE", client)
+                handle_pipeline_failure(db, task.plan_id, task.id)
+            elif build_result == "ABORTED":
+                task.status = "CANCELLED"
+                task.error_message = "Jenkins Build was aborted (Reconciled)"
+                db.commit()
+                send_release_notification(task.id, "failed")
+                write_history(db, task, "CANCELLED", duration, "ABORTED", client)
+                handle_pipeline_failure(db, task.plan_id, task.id)
             else:
                 task.status = "FAILED"
                 task.error_message = f"Jenkins Build completed with status: {build_result} (Reconciled)"
@@ -108,6 +143,7 @@ def reconcile_single_task(db: Session, task_id: int) -> bool:
                 write_history(db, task, "FAILED", duration, build_result, client)
                 handle_pipeline_failure(db, task.plan_id, task.id)
             
+            check_and_finalize_plan(db, task.plan_id)
             logger.info(f"Task {task_id} successfully reconciled to status: {task.status}")
             return True
     except Exception as e:
@@ -117,15 +153,17 @@ def reconcile_single_task(db: Session, task_id: int) -> bool:
 
 def reconcile_running_tasks():
     """
-    Scheduled background task to reconcile any tasks currently in RUNNING state.
+    Scheduled background task to reconcile any tasks currently in QUEUED, BUILDING, or RUNNING state.
     """
     db: Session = SyncSessionLocal()
     try:
-        running_tasks = db.query(ReleaseTask).filter(ReleaseTask.status == "RUNNING").all()
+        running_tasks = db.query(ReleaseTask).filter(
+            ReleaseTask.status.in_(["QUEUED", "BUILDING", "RUNNING"])
+        ).all()
         if not running_tasks:
             return
             
-        logger.info(f"Scheduled reconciliation: Found {len(running_tasks)} RUNNING tasks to check.")
+        logger.info(f"Scheduled reconciliation: Found {len(running_tasks)} active tasks to check.")
         for task in running_tasks:
             try:
                 reconcile_single_task(db, task.id)
@@ -200,9 +238,6 @@ def execute_task_workflow(plan_id: int, task_id: int):
             plan.status = "RUNNING"
             db.commit()
 
-        # Broadcast release start notice
-        send_release_notification(task.id, "start")
-
         # 2. Setup Jenkins API Client
         server = db.query(JenkinsServer).filter(JenkinsServer.id == task.server_id).first()
         if not server:
@@ -230,11 +265,64 @@ def execute_task_workflow(plan_id: int, task_id: int):
                     raise Exception(f"Failed to trigger Jenkins build after {max_retries} attempts. Error: {str(e)}")
                 time.sleep(retry_delay)
 
-        # 4. Resolve Queue item to Build Number
+        # 4. Resolve Queue item to Build Number (State: QUEUED)
+        task.status = "QUEUED"
+        task.error_message = None
+        db.commit()
+
+        def queue_on_poll(why: str):
+            try:
+                db.refresh(task)
+                if task.status == "CANCELLED":
+                    raise RuntimeError(f"Task {task_id} was cancelled by user while queued in Jenkins.")
+                if why:
+                    task.error_message = f"Jenkins 队列等待: {why}"
+                else:
+                    task.error_message = None
+                db.commit()
+            except Exception as poll_ex:
+                if "cancelled by user" in str(poll_ex).lower():
+                    raise poll_ex
+
         logger.info(f"Polling queue item to resolve build number: {queue_url}")
-        build_number = client.get_build_number_from_queue(queue_url)
-        task.build_number = build_number
+        try:
+            try:
+                build_number = client.get_build_number_from_queue(queue_url, on_poll=queue_on_poll)
+            except TypeError:
+                build_number = client.get_build_number_from_queue(queue_url)
+        except Exception as q_err:
+            db.refresh(task)
+            if task.status == "CANCELLED" or "cancelled by user" in str(q_err).lower():
+                logger.info(f"Task {task_id} was cancelled while in queue. Stopping flow.")
+                return
+            raise q_err
         
+        # 4.1 强校验与纠偏：对比 Jenkins 最新构建记录与 resolve 到的 build_number，防错位
+        try:
+            recent = client.get_recent_builds(task.job_name, limit=5)
+            active_building = [b for b in recent if b.get("status") == "BUILDING"]
+            if active_building:
+                latest_real_number = max(b["number"] for b in active_building)
+                if latest_real_number != build_number:
+                    logger.warning(f"检测到构建号错位！解析号 #{build_number} != Jenkins 真实正在运行号 #{latest_real_number}，自动校准为 #{latest_real_number}")
+                    build_number = latest_real_number
+            elif recent:
+                latest_real_number = max(b["number"] for b in recent)
+                if latest_real_number > build_number:
+                    logger.warning(f"检测到构建号偏旧！解析号 #{build_number} < Jenkins 最新号 #{latest_real_number}，自动校准为 #{latest_real_number}")
+                    build_number = latest_real_number
+        except Exception as check_ex:
+            logger.warning(f"校准构建号时忽略异常: {check_ex}")
+
+        # 5. Transition to BUILDING state
+        task.status = "BUILDING"
+        task.build_number = build_number
+        task.started_at = datetime.now()
+        task.error_message = None
+        db.commit()
+
+        # Broadcast release start notice with 100% accurate build_number
+        send_release_notification(task.id, "start")
         # Compute exact URL links
         job_path = "/".join([f"job/{part}" for part in task.job_name.split("/")])
         task.build_url = f"{server.url.rstrip('/')}/{job_path}/{build_number}/"
@@ -248,7 +336,7 @@ def execute_task_workflow(plan_id: int, task_id: int):
             client.stop_build(task.job_name, build_number)
             return
 
-        # 5. Poll Build Result Status
+        # 6. Poll Build Result Status
         logger.info(f"Polling build state for job: {task.job_name} #{build_number}")
         poll_interval = 8
         timeout_seconds = 3600  # Default 1h timeout
@@ -256,24 +344,41 @@ def execute_task_workflow(plan_id: int, task_id: int):
         
         build_result = None
         duration = 0
+        consecutive_not_found = 0
         
         while time.time() - poll_start < timeout_seconds:
             # Retrieve fresh instance from DB in case status was updated asynchronously
             db.refresh(task)
-            if task.status == "CANCELLED":
-                logger.info(f"Task {task_id} was aborted by user. Exiting poll loop.")
-                # Task status is already CANCELLED, return early
+            if task.status in ["CANCELLED", "SUCCESS", "FAILED", "UNSTABLE", "SKIPPED"]:
+                logger.info(f"Task {task_id} status is already final ({task.status}). Exiting poll loop.")
                 return
                 
             try:
                 status_info = client.get_build_status(task.job_name, build_number)
+                consecutive_not_found = 0
                 if not status_info["building"]:
                     build_result = status_info["result"]
                     duration = status_info["duration"]
                     break
             except Exception as e:
-                logger.warning(f"Failed polling Jenkins build status: {str(e)}")
+                err_str = str(e).lower()
+                logger.warning(f"Failed polling Jenkins build status for #{build_number}: {str(e)}")
+                if "404" in err_str or "not found" in err_str or "does not exist" in err_str:
+                    consecutive_not_found += 1
+                    if consecutive_not_found >= 3:
+                        logger.error(f"Jenkins build #{build_number} for {task.job_name} not found after 3 retries. Marking task as FAILED.")
+                        task.status = "FAILED"
+                        task.error_message = f"Jenkins 远端无构建记录 #{build_number}（可能已被手动删除或队列取消）"
+                        task.finished_at = datetime.now()
+                        db.commit()
+                        send_release_notification(task.id, "failed")
+                        return
             time.sleep(poll_interval)
+
+        db.refresh(task)
+        if task.status in ["CANCELLED", "SUCCESS", "FAILED", "UNSTABLE", "SKIPPED"]:
+            logger.info(f"Task {task_id} was finalized externally during poll. Exiting workflow.")
+            return
 
         if not build_result:
             raise TimeoutError(f"Jenkins build did not finish within the maximum timeout of {timeout_seconds} seconds.")
@@ -283,11 +388,26 @@ def execute_task_workflow(plan_id: int, task_id: int):
 
         if build_result == "SUCCESS":
             task.status = "SUCCESS"
+            task.error_message = None
             db.commit()
             send_release_notification(task.id, "success")
             write_history(db, task, "SUCCESS", duration, "SUCCESS", client)
             # Advance to next dependency in pipeline
             handle_pipeline_success(db, plan_id, task_id)
+        elif build_result == "UNSTABLE":
+            task.status = "UNSTABLE"
+            task.error_message = "Jenkins 构建完成，状态为 UNSTABLE (不稳定)"
+            db.commit()
+            send_release_notification(task.id, "failed")
+            write_history(db, task, "UNSTABLE", duration, "UNSTABLE", client)
+            handle_pipeline_failure(db, plan_id, task_id)
+        elif build_result == "ABORTED":
+            task.status = "CANCELLED"
+            task.error_message = "Jenkins 构建被手动中止 (ABORTED)"
+            db.commit()
+            send_release_notification(task.id, "failed")
+            write_history(db, task, "CANCELLED", duration, "ABORTED", client)
+            handle_pipeline_failure(db, plan_id, task_id)
         else:
             task.status = "FAILED"
             task.error_message = f"Jenkins Build completed with status: {build_result}"
@@ -301,16 +421,28 @@ def execute_task_workflow(plan_id: int, task_id: int):
         # Check current state in DB
         db.rollback()
         task = db.query(ReleaseTask).filter(ReleaseTask.id == task_id).first()
-        if task and task.status != "CANCELLED":
-            # Attempt final instant status check/correction from Jenkins
+        if task and task.status not in ["CANCELLED", "SUCCESS", "FAILED", "UNSTABLE", "SKIPPED"]:
+            is_still_building = False
             corrected = False
+            
             if task.build_number:
                 try:
-                    corrected = reconcile_single_task(db, task_id)
+                    server = db.query(JenkinsServer).filter(JenkinsServer.id == task.server_id).first()
+                    if server:
+                        client = JenkinsClient(server.url, server.username, server.api_token)
+                        status_info = client.get_build_status(task.job_name, task.build_number)
+                        if status_info.get("building") is True:
+                            is_still_building = True
+                        else:
+                            corrected = reconcile_single_task(db, task_id)
                 except Exception as ex:
-                    logger.error(f"Failed to execute final inline correction for task {task_id}: {str(ex)}")
-            
-            if not corrected:
+                    logger.error(f"Failed to execute inline status check for task {task_id}: {str(ex)}")
+
+            if is_still_building:
+                logger.warning(f"Task {task_id} transient error: '{str(e)}', Jenkins build #{task.build_number} still BUILDING. Keeping BUILDING state.")
+                task.error_message = f"网络连接闪断: {str(e)} (后端保持构建检测)"
+                db.commit()
+            elif not corrected:
                 task.status = "FAILED"
                 task.error_message = str(e)
                 task.finished_at = datetime.now()
@@ -457,18 +589,32 @@ def check_and_finalize_plan(db: Session, plan_id: int):
     tasks = db.query(ReleaseTask).filter(ReleaseTask.plan_id == plan_id).all()
     statuses = [t.status for t in tasks]
     
-    # If anything is still running or pending, plan is active
-    if any(s in ["WAITING", "RUNNING"] for s in statuses):
+    # 1. 如果所有任务都处于 WAITING 状态，计划状态保持 WAITING（等待中）
+    if all(s == "WAITING" for s in statuses):
+        if plan.status not in ["WAITING", "CANCELLED", "FAILED"]:
+            plan.status = "WAITING"
+            db.commit()
+        return
+
+    # 2. 如果存在正在队列中或构建中的任务 (QUEUED, BUILDING, RUNNING) 或部分已完成，计划状态为 RUNNING
+    if any(s in ["QUEUED", "BUILDING", "RUNNING"] for s in statuses) or (any(s in ["SUCCESS", "FAILED", "CANCELLED", "UNSTABLE"] for s in statuses) and any(s in ["WAITING", "QUEUED", "BUILDING", "RUNNING"] for s in statuses)):
+        if plan.status != "RUNNING":
+            plan.status = "RUNNING"
+            db.commit()
         return
         
     # Check results to decide final plan state
     if all(s == "SUCCESS" for s in statuses):
         plan.status = "SUCCESS"
-    elif any(s == "FAILED" for s in statuses):
+    elif any(s in ["FAILED", "UNSTABLE"] for s in statuses):
         plan.status = "FAILED"
+    elif any(s == "CANCELLED" for s in statuses):
+        plan.status = "CANCELLED"
     else:
-        # e.g., mix of success, skipped, cancelled
+        # e.g., all skipped or mix of skipped
         plan.status = "FAILED"
         
     db.commit()
     logger.info(f"Release Plan {plan_id} completed execution. Final consolidated status: {plan.status}")
+
+

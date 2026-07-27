@@ -37,6 +37,7 @@
               <th scope="col">状态</th>
               <th scope="col">预检状态</th>
               <th scope="col">类型</th>
+              <th scope="col">创建时间</th>
               <th scope="col">调度时间</th>
               <th scope="col">星期</th>
               <th scope="col">任务数</th>
@@ -48,26 +49,22 @@
               <td>
                 <RouterLink class="cell-title" :to="`/release/${plan.id}`">
                   <strong>{{ plan.name }}</strong>
-                  <span class="muted mono">#{{ plan.id }} · 创建 {{ formatDateTime(plan.created_at) }}</span>
                 </RouterLink>
               </td>
               <td><StatusBadge :status="plan.status" /></td>
               <td>
-                <div class="cell-title">
-                  <n-tag size="small" :type="preflightTagType(plan.preflight_status)">{{ getPreflightMeta(plan.preflight_status).label }}</n-tag>
-                  <span class="muted mono">{{ formatDateTime(plan.preflight_checked_at) }}</span>
-                </div>
+                <n-tag size="small" :type="preflightTagType(plan.preflight_status)">{{ getPreflightMeta(plan.preflight_status).label }}</n-tag>
               </td>
               <td>{{ formatPlanType(plan.type) }}</td>
+              <td class="mono">{{ formatDateTime(plan.created_at) }}</td>
               <td class="mono">{{ formatDateTime(plan.execute_time) }}</td>
               <td class="mono">{{ getWeekDay(plan.execute_time) }}</td>
               <td class="mono">{{ plan.tasks?.length || 0 }}</td>
               <td>
                 <div class="cell-actions">
-                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status !== 'WAITING' || busyKey === `preflight-${plan.id}` || isPreflightBlocked(plan.preflight_status)" :title="isPreflightBlocked(plan.preflight_status) ? '请先完成并通过发布前检查' : undefined" @click="triggerPlan(plan)">运行</n-button>
-                  <n-button size="tiny" secondary :loading="busyKey === `preflight-${plan.id}`" @click="preflightPlan(plan)">发布前检查</n-button>
+                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status === 'RUNNING' || busyKey === `preflight-${plan.id}` || isPreflightBlocked(plan.preflight_status)" :title="isPreflightBlocked(plan.preflight_status) ? '请先完成并通过检测' : undefined" @click="triggerPlan(plan)">运行</n-button>
+                  <n-button size="tiny" secondary :loading="busyKey === `preflight-${plan.id}`" @click="preflightPlan(plan)">检测</n-button>
                   <n-button size="tiny" type="warning" secondary :loading="busyKey === `cancel-${plan.id}`" :disabled="!['WAITING', 'RUNNING'].includes(plan.status)" @click="cancelPlan(plan)">停止</n-button>
-                  <n-button size="tiny" secondary :loading="busyKey === `retry-${plan.id}`" :disabled="['WAITING', 'RUNNING'].includes(plan.status)" @click="retryPlan(plan)">重试</n-button>
                   <n-button size="tiny" secondary :disabled="plan.status !== 'WAITING'" @click="openEditWizard(plan)">编辑</n-button>
                   <n-button size="tiny" secondary @click="$router.push(`/release/${plan.id}`)">日志</n-button>
                   <n-button size="tiny" type="error" secondary :loading="busyKey === `delete-${plan.id}`" :disabled="plan.status === 'RUNNING'" @click="deletePlan(plan)">删除</n-button>
@@ -99,12 +96,20 @@
           </n-form-item>
           <n-form-item v-if="wizardForm.type !== 'IMMEDIATE'" label="调度时间" required>
             <div class="schedule-time-control">
-              <n-date-picker v-model:value="wizardForm.execute_time" type="datetime" clearable style="width: 100%" />
-              <div class="quick-time-buttons">
-                <span class="muted">快捷选择</span>
-                <n-button size="small" secondary @click="setQuickExecuteTime(21, 30)">21:30</n-button>
-                <n-button size="small" secondary @click="setQuickExecuteTime(22, 0)">22:00</n-button>
-              </div>
+              <n-date-picker
+                v-model:value="wizardForm.execute_time"
+                type="datetime"
+                clearable
+                style="width: 100%"
+                panel-class="release-time-picker-panel"
+              >
+                <template #footer>
+                  <div class="quick-time-in-footer">
+                    <n-button size="tiny" secondary @click="setQuickExecuteTime(21, 30)">21:30</n-button>
+                    <n-button size="tiny" secondary @click="setQuickExecuteTime(22, 0)">22:00</n-button>
+                  </div>
+                </template>
+              </n-date-picker>
             </div>
           </n-form-item>
           <n-form-item v-if="wizardForm.type === 'BATCH'" label="批次间隔">
@@ -117,16 +122,19 @@
       </div>
 
       <div v-if="currentStep === 2" class="wizard-section task-editor">
+        <n-alert type="info" show-icon style="margin-bottom: 14px">
+          💡 操作提示：请依次选择 Jenkins 实例、View 视图和 Job 任务。分支下拉框将自动加载候选分支，您也可以直接在框中手动输入自定义分支或 Tag 标签。
+        </n-alert>
         <div v-for="(task, index) in wizardForm.tasks" :key="index" class="task-row">
           <div class="task-row__header">
             <strong>任务 #{{ index + 1 }}</strong>
             <n-button v-if="wizardForm.tasks.length > 1" size="tiny" type="error" secondary @click="removeTaskRow(index)">删除</n-button>
           </div>
           <div class="task-row__grid">
-            <n-select v-model:value="task.server_id" :options="serverOptions" placeholder="Jenkins 实例" @update:value="(value) => onTaskServerChange(Number(value), index)" />
-            <n-select v-model:value="task.view_id" :options="taskViewOptions[index] || []" placeholder="View" @update:value="(value) => onTaskViewChange(Number(value), index)" />
-            <n-select v-model:value="task.job_id" :options="taskJobOptions[index] || []" placeholder="Job" @update:value="(value) => onTaskJobChange(Number(value), index)" />
-            <n-select v-model:value="task.branch" :options="taskBranchOptions[index] || []" placeholder="请选择分支（也可手动输入）" filterable tag />
+            <n-select v-model:value="task.server_id" :options="serverOptions" placeholder="请选择 Jenkins 实例" @update:value="(value) => onTaskServerChange(Number(value), index)" />
+            <n-select v-model:value="task.view_id" :options="taskViewOptions[index] || []" placeholder="请选择 View 视图" @update:value="(value) => onTaskViewChange(Number(value), index)" />
+            <n-select v-model:value="task.job_id" :options="taskJobOptions[index] || []" placeholder="请选择 Job 任务" @update:value="(value) => onTaskJobChange(Number(value), index)" />
+            <n-select v-model:value="task.branch" :options="taskBranchOptions[index] || []" :placeholder="!task.job_id ? '请先选择 Job 任务' : '选择分支或手动输入分支/Tag'" filterable tag title="提示：可从下拉列表中选择分支，也可直接手动输入分支/Tag" />
           </div>
         </div>
         <n-button dashed block type="primary" @click="addTaskRow">添加任务</n-button>
@@ -175,14 +183,14 @@
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showPreflight" preset="card" :title="`${selectedPreflight?.name || '发布计划'} · 发布前检查`" style="width: min(760px, 94vw)">
+    <n-modal v-model:show="showPreflight" preset="card" :title="selectedPreflight?.name ? `检测结果 - ${selectedPreflight.name}` : '检测结果'" style="width: min(760px, 94vw)">
       <PreflightResult :result="selectedPreflight?.preflight_result" :checked-at="selectedPreflight?.preflight_checked_at" />
     </n-modal>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NAlert,
@@ -216,11 +224,12 @@ interface ReleaseTask {
   view_id?: number | null;
   job_id: number | null;
   job_name?: string;
-  branch: string;
+  branch: string | null;
   parameters?: Record<string, unknown>;
   sequence?: number;
   depends_on_task_id?: number | null;
   depends_on_sequence?: number | null;
+  error_message?: string | null;
 }
 
 interface ReleasePlan {
@@ -326,7 +335,7 @@ function emptyTask(): ReleaseTask {
     server_id: null,
     view_id: null,
     job_id: null,
-    branch: '',
+    branch: null,
     depends_on_task_id: null,
   };
 }
@@ -382,7 +391,7 @@ async function runAction(key: string, action: () => Promise<void>) {
 function triggerPlan(plan: ReleasePlan) {
   if (busyKey.value === `preflight-${plan.id}`) return;
   if (isPreflightBlocked(plan.preflight_status)) {
-    message.warning('请先完成并通过发布前检查。');
+    message.warning('请先完成并通过检测。');
     return;
   }
   const execute = () => runAction(`run-${plan.id}`, async () => {
@@ -391,15 +400,21 @@ function triggerPlan(plan: ReleasePlan) {
   });
   if (plan.preflight_status === 'WARNING') {
     dialog.warning({
-      title: '预检存在警告',
-      content: '最近一次检查存在临时性问题，仍要运行吗？',
+      title: '检测存在警告',
+      content: `计划 [${plan.name}] 检测存在警告，是否现在立即运行？`,
       positiveText: '仍然运行',
       negativeText: '取消',
       onPositiveClick: execute,
     });
     return;
   }
-  execute();
+  dialog.info({
+    title: '运行确认',
+    content: `是否现在立即运行发布计划 [${plan.name}]？`,
+    positiveText: '立即运行',
+    negativeText: '取消',
+    onPositiveClick: execute,
+  });
 }
 
 async function preflightPlan(plan: ReleasePlan) {
@@ -410,7 +425,7 @@ async function preflightPlan(plan: ReleasePlan) {
     showPreflight.value = true;
     await loadPlans();
   } catch (err: any) {
-    message.error(err.message || '发布前检查失败。');
+    message.error(err.message || '检测失败。');
   } finally {
     busyKey.value = '';
   }
@@ -442,41 +457,7 @@ function deletePlan(plan: ReleasePlan) {
   });
 }
 
-function retryPlan(plan: ReleasePlan) {
-  if (!plan.tasks.length) {
-    message.warning('该计划没有可重试任务。');
-    return;
-  }
-  runAction(`retry-${plan.id}`, async () => {
-    const retryType = plan.type === 'PIPELINE' ? 'PIPELINE' : 'IMMEDIATE';
-    const payload = buildPayload(plan, `Retry ${plan.name}`, retryType);
-    if (retryType === 'PIPELINE') {
-      payload.execute_time = new Date(Date.now() + 5 * 60_000).toISOString();
-    }
-    const response = await request.post('/release/plans', payload);
-    if (retryType === 'PIPELINE') {
-      if (isPreflightBlocked(response.data.preflight_status)) {
-        message.error('重试计划已创建，但发布前检查未通过。');
-        return;
-      }
-      if (response.data.preflight_status === 'WARNING') {
-        dialog.warning({
-          title: '预检存在警告',
-          content: '重试计划已创建，最近一次检查存在临时性问题，仍要运行吗？',
-          positiveText: '仍然运行',
-          negativeText: '取消',
-          onPositiveClick: () => runAction(`retry-${response.data.id}`, async () => {
-            await request.post(`/release/plans/${response.data.id}/trigger`);
-            message.success('已触发重试任务。');
-          }),
-        });
-        return;
-      }
-      await request.post(`/release/plans/${response.data.id}/trigger`);
-    }
-    message.success('已创建重试任务。');
-  });
-}
+
 
 function buildPayload(plan: ReleasePlan, name = plan.name, type = plan.type) {
   return {
@@ -489,7 +470,7 @@ function buildPayload(plan: ReleasePlan, name = plan.name, type = plan.type) {
       server_id: task.server_id,
       job_id: task.job_id,
       job_name: task.job_name,
-      branch: task.branch,
+      branch: task.branch || '',
       parameters: task.parameters || {},
       sequence: index,
       depends_on_sequence: type === 'PIPELINE' && index > 0 ? index - 1 : null,
@@ -567,10 +548,24 @@ function nextStep() {
     }
   }
   if (currentStep.value === 2) {
-    const invalidIndex = wizardForm.value.tasks.findIndex((task) => !task.server_id || !task.view_id || !task.job_id || !task.branch);
-    if (invalidIndex >= 0) {
-      message.error(`任务 #${invalidIndex + 1} 未配置完整。`);
-      return;
+    for (let i = 0; i < wizardForm.value.tasks.length; i++) {
+      const task = wizardForm.value.tasks[i];
+      if (!task.server_id) {
+        message.error(`任务 #${i + 1} 请选择 Jenkins 实例。`);
+        return;
+      }
+      if (!task.view_id) {
+        message.error(`任务 #${i + 1} 请选择 View 视图。`);
+        return;
+      }
+      if (!task.job_id) {
+        message.error(`任务 #${i + 1} 请选择 Job 任务。`);
+        return;
+      }
+      if (!task.branch) {
+        message.error(`任务 #${i + 1} 请选择或手动输入分支/Tag。`);
+        return;
+      }
     }
   }
   currentStep.value += 1;
@@ -604,7 +599,7 @@ async function loadTaskBranches(serverId: number, jobId: number, index: number) 
     taskBranchOptions.value[index] = (res.data || []).map((branch: string) => ({ label: branch, value: branch }));
   } catch (err: any) {
     taskBranchOptions.value[index] = [];
-    message.warning(err.response?.data?.detail || '未获取到分支列表，可手动输入分支或 Tag。');
+    message.warning(err.response?.data?.detail || '未获取到分支列表，您可以直接手动输入分支或 Tag。');
   }
 }
 
@@ -612,7 +607,7 @@ async function onTaskServerChange(value: number, index: number) {
   const task = wizardForm.value.tasks[index];
   task.view_id = null;
   task.job_id = null;
-  task.branch = '';
+  task.branch = null;
   taskViewOptions.value[index] = [];
   taskJobOptions.value[index] = [];
   taskBranchOptions.value[index] = [];
@@ -628,7 +623,7 @@ async function onTaskServerChange(value: number, index: number) {
 async function onTaskViewChange(value: number, index: number) {
   const task = wizardForm.value.tasks[index];
   task.job_id = null;
-  task.branch = '';
+  task.branch = null;
   taskJobOptions.value[index] = [];
   taskBranchOptions.value[index] = [];
   if (task.server_id && value) await loadTaskJobs(task.server_id, value, index);
@@ -636,7 +631,7 @@ async function onTaskViewChange(value: number, index: number) {
 
 async function onTaskJobChange(value: number, index: number) {
   const task = wizardForm.value.tasks[index];
-  task.branch = '';
+  task.branch = null;
   taskBranchOptions.value[index] = [];
   
   // Save job_name snapshot
@@ -708,9 +703,39 @@ watch(() => route.query.edit, (value) => {
   if (value) openEditFromQuery(value);
 });
 
+let pollTimer: any = null;
+
+async function fetchPlansSilent() {
+  try {
+    const res = await request.get('/release/plans');
+    plans.value = res.data || [];
+  } catch (e) {
+    // 静默轮询
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(() => {
+    fetchPlansSilent();
+  }, 3500);
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
 onMounted(async () => {
   await Promise.all([loadPlans(), loadServers()]);
   if (route.query.edit) await openEditFromQuery(route.query.edit);
+  startPolling();
+});
+
+onUnmounted(() => {
+  stopPolling();
 });
 </script>
 
@@ -815,6 +840,27 @@ onMounted(async () => {
 .wizard-actions > div {
   display: flex;
   gap: 8px;
+}
+</style>
+
+<style>
+.release-time-picker-panel {
+  position: relative;
+}
+.release-time-picker-panel .n-date-picker-footer {
+  border-top: none !important;
+  padding: 0 !important;
+  height: 0 !important;
+  overflow: visible !important;
+}
+.release-time-picker-panel .quick-time-in-footer {
+  position: absolute;
+  bottom: 8px;
+  left: 12px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 </style>
 

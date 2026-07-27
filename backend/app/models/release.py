@@ -38,7 +38,7 @@ class ReleaseTask(Base):
     parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     sequence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     depends_on_task_id: Mapped[int] = mapped_column(Integer, ForeignKey("release_task.id", ondelete="SET NULL"), nullable=True)
-    status: Mapped[str] = mapped_column(String(30), default="WAITING", nullable=False) # WAITING, RUNNING, SUCCESS, FAILED, SKIPPED, CANCELLED
+    status: Mapped[str] = mapped_column(String(30), default="WAITING", nullable=False) # WAITING, QUEUED, BUILDING, RUNNING, SUCCESS, FAILED, UNSTABLE, SKIPPED, CANCELLED
     build_number: Mapped[int] = mapped_column(Integer, nullable=True)
     console_url: Mapped[str] = mapped_column(String(255), nullable=True)
     build_url: Mapped[str] = mapped_column(String(255), nullable=True)

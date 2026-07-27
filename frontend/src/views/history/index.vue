@@ -27,10 +27,15 @@
       </template>
     </n-tabs>
 
-    <div class="toolbar">
-      <n-input v-model:value="queryJobName" clearable placeholder="搜索 Job 名称" style="width: 280px" @keyup.enter="fetchHistories(true, 'query')" />
-      <n-select v-model:value="queryStatus" :options="statusOptions" clearable placeholder="执行状态" style="width: 160px" />
-      <RefreshButton secondary label="查询" :loading="queryLoading" @click="fetchHistories(true, 'query')" />
+    <div class="toolbar" style="display: flex; align-items: center; justify-content: space-between;">
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <n-input v-model:value="queryJobName" clearable placeholder="搜索 Job 名称" style="width: 280px" @keyup.enter="fetchHistories(true, 'query')" />
+        <n-select v-model:value="queryStatus" :options="statusOptions" clearable placeholder="执行状态" style="width: 160px" />
+        <RefreshButton secondary label="查询" :loading="queryLoading" @click="fetchHistories(true, 'query')" />
+      </div>
+      <n-button size="small" type="warning" secondary :loading="resetSeqLoading" @click="confirmResetSequence">
+        重置 ID 重新从 #1 开始计算
+      </n-button>
     </div>
 
     <section class="panel">
@@ -93,9 +98,9 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { NAlert, NButton, NInput, NModal, NPagination, NSelect, NSkeleton, NTabPane, NTabs, useMessage } from 'naive-ui';
+import { NAlert, NButton, NInput, NModal, NPagination, NSelect, NSkeleton, NTabPane, NTabs, useDialog, useMessage } from 'naive-ui';
 import LogViewer from '../../components/LogViewer.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
@@ -120,9 +125,32 @@ interface ReleaseHistory {
 const route = useRoute();
 const router = useRouter();
 const message = useMessage();
+const dialog = useDialog();
 const pageLoading = ref(false);
 const headerRefreshLoading = ref(false);
 const queryLoading = ref(false);
+const resetSeqLoading = ref(false);
+
+function confirmResetSequence() {
+  dialog.warning({
+    title: '确认重置历史记录 ID 序号？',
+    content: '此操作将清空当前的发布历史与外部构建记录，并重置数据库计数器。重置后，系统产生的新构建记录将重新从 ID #1 开始计算。确定要继续吗？',
+    positiveText: '确认重置归零',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      resetSeqLoading.value = true;
+      try {
+        const res = await request.post('/history/reset-sequence');
+        message.success(res.data?.message || '历史记录 ID 已重置，从 #1 重新开始计算！');
+        await fetchHistories(true);
+      } catch (err: any) {
+        message.error(err.message || '重置历史记录 ID 失败。');
+      } finally {
+        resetSeqLoading.value = false;
+      }
+    }
+  });
+}
 const syncing = ref(false);
 const error = ref('');
 const histories = ref<ReleaseHistory[]>([]);
@@ -134,21 +162,58 @@ const limit = 15;
 const logModalVisible = ref(false);
 const activeHistory = ref<ReleaseHistory | null>(null);
 const activeTab = ref<'system' | 'external'>('system');
+let autoPollTimer: any = null;
 
 const statusOptions = [
   { label: '成功', value: 'SUCCESS' },
   { label: '失败', value: 'FAILED' },
 ];
 
-function onTabChange() {
+function stopAutoPolling() {
+  if (autoPollTimer) {
+    clearInterval(autoPollTimer);
+    autoPollTimer = null;
+  }
+}
+
+function startAutoPolling() {
+  stopAutoPolling();
+  autoPollTimer = setInterval(async () => {
+    try {
+      if (activeTab.value === 'external') {
+        await request.post('/history/sync', null, {
+          params: { job_name: queryJobName.value || undefined }
+        });
+      }
+      await fetchHistories(false);
+    } catch {
+      // Ignore silent background refresh errors
+    }
+  }, 3000);
+}
+
+async function onTabChange() {
   fetchHistories(true);
+  if (activeTab.value === 'external') {
+    try {
+      await request.post('/history/sync', null, {
+        params: { job_name: queryJobName.value || undefined }
+      });
+      await fetchHistories(false);
+    } catch {
+      // Ignore background sync errors on tab click
+    }
+  }
+  startAutoPolling();
 }
 
 async function syncExternalHistories() {
   syncing.value = true;
   const startTime = Date.now();
   try {
-    await request.post('/history/sync');
+    await request.post('/history/sync', null, {
+      params: { job_name: queryJobName.value || undefined }
+    });
     message.success('外部手动构建同步成功！');
     await fetchHistories(true);
   } catch (err: any) {
@@ -170,7 +235,7 @@ async function fetchHistories(resetPage = false, trigger?: 'page' | 'header' | '
       ? queryLoading
       : null;
   if (buttonLoading) buttonLoading.value = true;
-  else pageLoading.value = true;
+  else if (!autoPollTimer) pageLoading.value = true;
   const startTime = Date.now();
   error.value = '';
   try {
@@ -212,9 +277,28 @@ watch(() => route.query.job, (value) => {
   }
 });
 
-onMounted(() => {
+onMounted(async () => {
+  if (typeof route.query.tab === 'string' && (route.query.tab === 'external' || route.query.tab === 'system')) {
+    activeTab.value = route.query.tab;
+  }
   if (typeof route.query.job === 'string') queryJobName.value = route.query.job;
-  fetchHistories(true);
+  
+  if (activeTab.value === 'external') {
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      await request.post('/history/sync', null, {
+        params: { job_name: queryJobName.value || undefined }
+      });
+    } catch {
+      // Ignore background sync errors on mount
+    }
+  }
+  await fetchHistories(true);
+  startAutoPolling();
+});
+
+onUnmounted(() => {
+  stopAutoPolling();
 });
 </script>
 

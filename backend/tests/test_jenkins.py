@@ -43,6 +43,28 @@ def test_jenkins_trigger_build_with_parameters(mock_post):
         timeout=10
     )
 
+def test_queue_wait_does_not_expire_while_jenkins_reports_pending(monkeypatch):
+    clock = {"now": 0}
+    pending = MagicMock(status_code=200)
+    pending.json.return_value = {
+        "executable": None,
+        "why": "Waiting for next available executor",
+    }
+    started = MagicMock(status_code=200)
+    started.json.return_value = {"executable": {"number": 42}}
+
+    client = JenkinsClient("http://localhost:8080", "admin", "token123")
+    client.session.get = MagicMock(side_effect=[pending, pending, started])
+
+    fake_time = MagicMock()
+    fake_time.time.side_effect = lambda: clock["now"]
+    fake_time.sleep.side_effect = lambda seconds: clock.update(now=clock["now"] + 2)
+    monkeypatch.setattr("app.services.jenkins_client.time", fake_time)
+
+    assert client.get_build_number_from_queue(
+        "http://localhost:8080/queue/item/42/", timeout=3
+    ) == 42
+
 
 @patch('requests.Session.post')
 def test_jenkins_stop_build_posts_to_stop_endpoint(mock_post):

@@ -56,7 +56,6 @@
               <td>
                 <RouterLink class="cell-title" :to="`/release/${plan.id}`">
                   <strong>{{ plan.name }}</strong>
-                  <span class="muted mono">#{{ plan.id }} · {{ formatPlanType(plan.type) }} · {{ plan.tasks?.length || 0 }} tasks</span>
                 </RouterLink>
               </td>
               <td>
@@ -64,7 +63,6 @@
                   <StatusBadge :status="plan.status" />
                   <span>
                     <n-tag size="small" :type="preflightTagType(plan.preflight_status)">{{ getPreflightMeta(plan.preflight_status).label }}</n-tag>
-                    <span class="muted mono"> {{ formatDateTime(plan.preflight_checked_at) }}</span>
                   </span>
                 </div>
               </td>
@@ -79,9 +77,8 @@
               </td>
               <td>
                 <div class="cell-actions">
-                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status !== 'WAITING' || isPreflightBlocked(plan.preflight_status)" :title="isPreflightBlocked(plan.preflight_status) ? '请先完成并通过发布前检查' : undefined" @click="triggerPlan(plan)">运行</n-button>
+                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status !== 'WAITING' || isPreflightBlocked(plan.preflight_status)" :title="isPreflightBlocked(plan.preflight_status) ? '请先完成并通过检测' : undefined" @click="triggerPlan(plan)">运行</n-button>
                   <n-button size="tiny" type="warning" secondary :loading="busyKey === `stop-${plan.id}`" :disabled="!['WAITING', 'RUNNING'].includes(plan.status)" @click="cancelPlan(plan)">停止</n-button>
-                  <n-button size="tiny" secondary :loading="busyKey === `retry-${plan.id}`" :disabled="['WAITING', 'RUNNING'].includes(plan.status)" @click="retryPlan(plan)">重试</n-button>
                   <n-button size="tiny" secondary :disabled="plan.status !== 'WAITING'" @click="editPlan(plan)">编辑</n-button>
                   <n-button size="tiny" secondary :disabled="!plan.tasks?.length" @click="openLogs(plan)">日志</n-button>
                   <n-button size="tiny" type="error" secondary :loading="busyKey === `delete-${plan.id}`" :disabled="plan.status === 'RUNNING'" @click="deletePlan(plan)">删除</n-button>
@@ -153,7 +150,6 @@ import {
   filterPlans,
   formatDateTime,
   formatDuration,
-  formatPlanType,
   getPreflightMeta,
   getPlanDurationSeconds,
   isPreflightBlocked,
@@ -173,6 +169,7 @@ interface ReleaseTask {
   duration: number;
   status: string;
   build_number?: number | null;
+  error_message?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
 }
@@ -327,7 +324,7 @@ async function runAction(key: string, action: () => Promise<void>) {
 
 function triggerPlan(plan: ReleasePlan) {
   if (isPreflightBlocked(plan.preflight_status)) {
-    message.warning('请先完成并通过发布前检查。');
+    message.warning('请先完成并通过检测。');
     return;
   }
   const execute = () => runAction(`run-${plan.id}`, async () => {
@@ -336,15 +333,21 @@ function triggerPlan(plan: ReleasePlan) {
   });
   if (plan.preflight_status === 'WARNING') {
     dialog.warning({
-      title: '预检存在警告',
-      content: '最近一次检查存在临时性问题，仍要运行吗？',
+      title: '检测存在警告',
+      content: `计划 [${plan.name}] 检测存在警告，是否现在立即运行？`,
       positiveText: '仍然运行',
       negativeText: '取消',
       onPositiveClick: execute,
     });
     return;
   }
-  execute();
+  dialog.info({
+    title: '运行确认',
+    content: `是否现在立即运行发布计划 [${plan.name}]？`,
+    positiveText: '立即运行',
+    negativeText: '取消',
+    onPositiveClick: execute,
+  });
 }
 
 function cancelPlan(plan: ReleasePlan) {
@@ -360,52 +363,7 @@ function cancelPlan(plan: ReleasePlan) {
   });
 }
 
-function retryPlan(plan: ReleasePlan) {
-  if (!plan.tasks?.length) {
-    message.warning('该计划没有可重试的任务。');
-    return;
-  }
-  runAction(`retry-${plan.id}`, async () => {
-    const retryType = plan.type === 'PIPELINE' ? 'PIPELINE' : 'IMMEDIATE';
-    const response = await request.post('/release/plans', {
-      name: `Retry ${plan.name}`,
-      type: retryType,
-      execute_time: retryType === 'PIPELINE' ? new Date(Date.now() + 5 * 60_000).toISOString() : null,
-      interval_minutes: plan.interval_minutes || 0,
-      pipeline_failure_strategy: plan.pipeline_failure_strategy || 'STOP',
-      tasks: plan.tasks.map((task, index) => ({
-        server_id: task.server_id,
-        job_id: task.job_id,
-        job_name: task.job_name,
-        branch: task.branch,
-        parameters: task.parameters || {},
-        sequence: index,
-        depends_on_sequence: retryType === 'PIPELINE' && index > 0 ? index - 1 : null,
-      })),
-    });
-    if (retryType === 'PIPELINE') {
-      if (isPreflightBlocked(response.data.preflight_status)) {
-        message.error('重试计划已创建，但发布前检查未通过。');
-        return;
-      }
-      if (response.data.preflight_status === 'WARNING') {
-        dialog.warning({
-          title: '预检存在警告',
-          content: '重试计划已创建，最近一次检查存在临时性问题，仍要运行吗？',
-          positiveText: '仍然运行',
-          negativeText: '取消',
-          onPositiveClick: () => runAction(`retry-${response.data.id}`, async () => {
-            await request.post(`/release/plans/${response.data.id}/trigger`);
-            message.success('已触发重试任务。');
-          }),
-        });
-        return;
-      }
-      await request.post(`/release/plans/${response.data.id}/trigger`);
-    }
-    message.success('已创建重试任务。');
-  });
-}
+
 
 function editPlan(plan: ReleasePlan) {
   router.push({ path: '/release', query: { edit: String(plan.id) } });
@@ -433,10 +391,10 @@ let pollTimer: any = null;
 
 onMounted(() => {
   loadDashboard();
-  // Silently refresh the dashboard every 15 seconds
+  // Silently refresh the dashboard every 4 seconds
   pollTimer = setInterval(() => {
     loadDashboard('poll');
-  }, 15000);
+  }, 4000);
 });
 
 onUnmounted(() => {

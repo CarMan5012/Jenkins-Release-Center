@@ -109,3 +109,31 @@ def test_cancelled_while_queued_stops_build_after_number_is_resolved():
 
     client.stop_build.assert_called_once_with("deploy", 43)
     assert db.get(ReleaseTask, task.id).status == "CANCELLED"
+
+
+def test_retry_plan_immediately_in_place():
+    from app.api.release import retry_plan_immediately
+    db, user, plan, task = session_with_running_task()
+    plan.status = "FAILED"
+    db.commit()
+
+    bg_tasks = MagicMock()
+    res = retry_plan_immediately(request(), plan.id, bg_tasks, db, user)
+    assert res["success"] is True
+    assert res["id"] == plan.id
+    assert plan.status == "RUNNING"
+
+
+def test_retry_single_task_in_place():
+    from app.api.release import retry_single_task
+    db, user, plan, task = session_with_running_task()
+    task.status = "FAILED"
+    plan.status = "FAILED"
+    db.commit()
+
+    bg_tasks = MagicMock()
+    res = retry_single_task(request(), plan.id, task.id, bg_tasks, db, user)
+    assert res["success"] is True
+    assert res["task_id"] == task.id
+    assert task.status == "WAITING"
+    assert plan.status == "RUNNING"

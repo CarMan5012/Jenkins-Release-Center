@@ -160,7 +160,12 @@ class JenkinsClient:
             return location
         raise Exception(f"Failed to trigger build: HTTP {response.status_code} - {response.text}")
 
-    def get_build_number_from_queue(self, queue_url: str, timeout: int = 300) -> int:
+    def get_build_number_from_queue(
+        self,
+        queue_url: str,
+        timeout: int = 300,
+        on_poll: Optional[Any] = None
+    ) -> int:
         """
         Polls the queue URL until the job gets scheduled, returning the actual build number.
         This provides high concurrency safety.
@@ -187,24 +192,32 @@ class JenkinsClient:
 
         api_url = urljoin(api_url, "api/json")
 
-        start_time = time.time()
-        while time.time() - start_time < timeout:
+        last_response_time = time.time()
+        while time.time() - last_response_time < timeout:
             try:
                 response = self.session.get(api_url, timeout=5)
                 if response.status_code == 200:
                     data = response.json()
-                    # If 'executable' exists, it means the build has started execution
-                    if "executable" in data:
-                        return data["executable"].get("number")
+                    executable = data.get("executable")
+                    if executable:
+                        build_number = executable.get("number")
+                        if build_number is not None:
+                            return build_number
                     if data.get("cancelled", False):
                         raise Exception("The build task in Jenkins queue was cancelled.")
+                    last_response_time = time.time()
                     why = data.get("why", "")
                     if why:
                         logger.info(f"Build pending in queue: {why}")
+                    if callable(on_poll):
+                        try:
+                            on_poll(why)
+                        except Exception as cb_err:
+                            logger.debug(f"on_poll callback failed: {str(cb_err)}")
             except Exception as e:
                 logger.warning(f"Error querying Jenkins queue item: {str(e)}")
             time.sleep(3)
-        raise Exception(f"Timeout ({timeout}s) waiting for build number. Queue URL: {queue_url}")
+        raise Exception(f"Timeout ({timeout}s) without a valid queue response. Queue URL: {queue_url}")
 
     def stop_build(self, job_name: str, build_number: int) -> None:
         job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
@@ -431,14 +444,22 @@ class JenkinsClient:
     def get_recent_builds(self, job_name: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Fetch recent builds for a job including number, result, timestamp, duration and causes.
+        Queries both allBuilds and builds to guarantee capturing in-progress (building) items across all Jenkins versions.
         """
         try:
             job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
-            # Use Jenkins API slicing feature to retrieve only the last N builds
-            url = urljoin(self.base_url, f"{job_path}/api/json?tree=builds[number,result,timestamp,duration,building,actions[causes[userName,shortDescription],parameters[name,value]]]{{0,{limit}}}")
+            tree_param = "allBuilds[number,result,timestamp,duration,building,actions[causes[userName,shortDescription],parameters[name,value]]],builds[number,result,timestamp,duration,building,actions[causes[userName,shortDescription],parameters[name,value]]]"
+            url = urljoin(self.base_url, f"{job_path}/api/json?tree={tree_param}")
             response = self.session.get(url, timeout=10)
             if response.status_code == 200:
-                return response.json().get("builds", [])
+                data = response.json()
+                raw_builds = data.get("allBuilds") or data.get("builds") or []
+                sorted_builds = sorted(
+                    [b for b in raw_builds if isinstance(b, dict) and b.get("number")],
+                    key=lambda b: b.get("number") or 0,
+                    reverse=True
+                )
+                return sorted_builds[:limit]
         except Exception as e:
             logger.warning(f"Failed to fetch recent builds for job {job_name}: {str(e)}")
         return []

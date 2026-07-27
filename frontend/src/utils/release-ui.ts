@@ -20,6 +20,8 @@ const STATUS_META: Record<string, StatusMeta> = {
   SUCCESS: { label: '成功', tone: 'success' },
   FAILED: { label: '失败', tone: 'danger' },
   FAILURE: { label: '失败', tone: 'danger' },
+  QUEUED: { label: '排队中', tone: 'warning' },
+  BUILDING: { label: '构建中', tone: 'running' },
   RUNNING: { label: '运行中', tone: 'running' },
   WAITING: { label: '等待中', tone: 'info' },
   CANCELLED: { label: '已取消', tone: 'disabled' },
@@ -36,8 +38,19 @@ const PREFLIGHT_META: Record<PreflightStatus, StatusMeta> = {
   FAILED: { label: '未通过', tone: 'danger' },
 };
 
-export function getStatusMeta(status?: string | null): StatusMeta {
+export function getStatusMeta(status?: string | null, buildNumber?: number | null): StatusMeta {
   if (!status) return { label: '未知', tone: 'neutral' };
+  
+  if (status === 'RUNNING') {
+    if (buildNumber === null || buildNumber === 0) {
+      return STATUS_META.QUEUED;
+    }
+    if (typeof buildNumber === 'number' && buildNumber > 0) {
+      return STATUS_META.BUILDING;
+    }
+    return STATUS_META.RUNNING;
+  }
+  
   return STATUS_META[status] || { label: status, tone: 'neutral' };
 }
 
@@ -118,6 +131,14 @@ export function getWeekDay(value?: string | null): string {
   if (Number.isNaN(date.getTime())) return '-';
   const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
   return days[date.getDay()];
+}
+
+export function formatScheduleWithDay(value?: string | null): string {
+  if (!value) return '-';
+  const dt = formatDateTime(value);
+  if (dt === '-') return '-';
+  const day = getWeekDay(value);
+  return day !== '-' ? `${dt} ${day}` : dt;
 }
 
 export function formatTriggerBy(trigger?: string | null): string {

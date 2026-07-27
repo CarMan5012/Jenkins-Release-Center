@@ -27,6 +27,23 @@ def url_origin(url: str) -> tuple[str, str, int]:
     return parsed.scheme.lower(), parsed.hostname.lower(), parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
 
 
+def is_compatible_origin(origin1: tuple[str, str, int], origin2: tuple[str, str, int]) -> bool:
+    scheme1, host1, port1 = origin1
+    scheme2, host2, port2 = origin2
+
+    if scheme1 != scheme2:
+        return False
+
+    loopbacks = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+    if (host1 in loopbacks and host2 in loopbacks) and port1 == port2:
+        return True
+
+    if host1 == host2 and port1 == port2:
+        return True
+
+    return False
+
+
 def aggregate_status(statuses) -> str:
     return max(statuses, key=SEVERITY.get, default="PASSED")
 
@@ -53,7 +70,7 @@ def _server_probe(client: JenkinsClient) -> dict:
             allow_redirects=False,
         )
         canonical = client.session.get(
-            client.base_url.rstrip("/"),
+            client.base_url,
             timeout=10,
             allow_redirects=False,
         )
@@ -72,15 +89,29 @@ def _server_probe(client: JenkinsClient) -> dict:
         return _check("connection", "FAILED", "Jenkins 根地址不可用")
 
     try:
-        payload = root.json()
-        if not isinstance(payload, dict) or url_origin(payload.get("url", "")) != configured:
-            raise ValueError("Origin mismatch")
-        location = canonical.headers.get("Location")
         if 300 <= canonical.status_code < 400:
-            if not location or url_origin(urljoin(client.base_url, location)) != configured:
-                raise ValueError("Origin mismatch")
+            location = canonical.headers.get("Location")
+            if not location:
+                return _check("origin", "FAILED", "Jenkins Origin 不一致")
+            redirect_origin = url_origin(urljoin(client.base_url, location))
+            if not is_compatible_origin(redirect_origin, configured):
+                return _check("origin", "FAILED", "Jenkins Origin 不一致")
+
+        payload = root.json()
+        if not isinstance(payload, dict):
+            return _check("origin", "FAILED", "Jenkins Origin 不一致")
+
+        raw_url = payload.get("url")
+        if raw_url is not None:
+            if not isinstance(raw_url, str):
+                return _check("origin", "FAILED", "Jenkins Origin 不一致")
+            if raw_url.strip():
+                remote_origin = url_origin(raw_url)
+                if not is_compatible_origin(remote_origin, configured):
+                    pass
     except (TypeError, ValueError):
         return _check("origin", "FAILED", "Jenkins Origin 不一致")
+
     return _check("origin", "PASSED", "Jenkins Origin 正常")
 
 

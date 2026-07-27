@@ -114,6 +114,18 @@
                 </n-button>
               </div>
             </n-form>
+
+            <n-divider style="margin: 32px 0 24px 0;" />
+
+            <div class="reset-sequence-block">
+              <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 8px;">历史记录 ID 序号重置</h3>
+              <p class="muted" style="font-size: 13px; margin-bottom: 16px; line-height: 1.6;">
+                清空当前的发布历史与外部构建记录，将数据库自增主键序号彻底归零重置。重置后，系统产生的新构建记录将重新从 <strong>ID #1</strong> 开始计算。
+              </p>
+              <n-button type="warning" secondary :loading="resetSeqLoading" @click="confirmResetSequence">
+                ID 重新从 #1 开始计算
+              </n-button>
+            </div>
           </div>
         </section>
       </n-tab-pane>
@@ -460,6 +472,28 @@ async function submitRetentionPolicy() {
   } finally {
     submitRetentionLoading.value = false;
   }
+}
+
+const resetSeqLoading = ref(false);
+
+function confirmResetSequence() {
+  dialog.warning({
+    title: '确认重置历史记录 ID 序号？',
+    content: '此操作将清空当前的发布历史与外部构建记录，并重置数据库计数器。重置后，系统产生的新构建记录将重新从 ID #1 开始计算。确定要继续吗？',
+    positiveText: '确认重置归零',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      resetSeqLoading.value = true;
+      try {
+        const res = await request.post('/history/reset-sequence');
+        message.success(res.data?.message || '历史记录 ID 已重置，从 #1 重新开始计算！');
+      } catch (err: any) {
+        message.error(err.message || '重置历史记录 ID 失败。');
+      } finally {
+        resetSeqLoading.value = false;
+      }
+    }
+  });
 }
 
 onMounted(() => {

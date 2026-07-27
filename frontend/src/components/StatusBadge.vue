@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <span class="status-badge" :class="`status-badge--${meta.tone}`">
     <span class="status-badge__dot"></span>
     {{ meta.label }}
@@ -11,7 +11,8 @@ import { getStatusMeta } from '../utils/release-ui';
 
 const props = defineProps<{
   status?: string | null;
+  buildNumber?: number | null;
 }>();
 
-const meta = computed(() => getStatusMeta(props.status));
+const meta = computed(() => getStatusMeta(props.status, props.buildNumber));
 </script>

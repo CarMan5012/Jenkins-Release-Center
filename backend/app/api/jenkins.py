@@ -20,6 +20,7 @@ from app.schemas.jenkins import (
     JenkinsViewResponse, JenkinsJobResponse, JenkinsBackupResponse
 )
 from app.services.jenkins_client import JenkinsClient
+from app.services.jenkins_sync_task import sync_external_builds
 
 router = APIRouter()
 
@@ -423,6 +424,50 @@ def get_git_branches(
         branches = ["master", "main", "develop", "release"]
 
     return branches
+
+@router.post("/servers/{server_id}/jobs/{job_id}/run")
+def run_job_directly(
+    request: Request,
+    server_id: int,
+    job_id: int,
+    payload: Dict[str, Any],
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_operator)
+):
+    """
+    Directly trigger a Jenkins build without creating a Release Plan in the database.
+    """
+    server = db.get(JenkinsServer, server_id)
+    job = db.get(JenkinsJob, job_id)
+    if not server or not job:
+        raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例或对应的 Job")
+    if not server.is_active:
+        raise HTTPException(status_code=400, detail="该 Jenkins 实例已被禁用，无法运行任务")
+
+    branch = payload.get("branch")
+    parameters = payload.get("parameters", {})
+
+    client = JenkinsClient(server.url, server.username, server.api_token)
+    try:
+        queue_url = client.trigger_build(job.name, parameters, branch=branch)
+        log_action(db, current_user, "RUN_JENKINS_JOB_DIRECTLY", get_client_ip(request), f"Directly triggered job '{job.name}' (branch: {branch}) on server '{server.name}'")
+        
+        def delayed_sync():
+            import time
+            time.sleep(1.2)
+            sync_external_builds(server_id=server_id, job_name=job.name)
+            
+        background_tasks.add_task(delayed_sync)
+        
+        return {
+            "success": True,
+            "message": f"成功向 Jenkins 触发任务 [{job.name}] 构建",
+            "queue_url": queue_url
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"触发 Jenkins 构建失败: {str(e)}")
+
 
 # ==========================================
 # Jenkins Server Jobs Configuration Backups

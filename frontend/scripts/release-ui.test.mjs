@@ -17,12 +17,12 @@ const configSource = fs.readFileSync(new URL('../src/views/config/index.vue', im
 
 assert.match(releaseViewSource, /const wizardForm = ref\(\{\s*name: '',\s*type: 'SCHEDULED'/);
 assert.match(releaseViewSource, /function openCreateWizard\(\)[\s\S]*?wizardForm\.value = \{\s*name: '',\s*type: 'SCHEDULED'/);
-assert.match(releaseViewSource, /placeholder="请选择分支（也可手动输入）"/);
-assert.match(releaseViewSource, /'未获取到分支列表，可手动输入分支或 Tag。'/);
+assert.match(releaseViewSource, /:placeholder="!task\.job_id \? '请先选择 Job 任务' : '选择分支或手动输入分支\/Tag'/);
+assert.match(releaseViewSource, /未获取到分支列表/);
 assert.doesNotMatch(releaseViewSource, /const first = taskBranchOptions/);
 assert.match(releaseViewSource, /servers = ref<Array<\{ id: number; name: string; is_active: number \}>>/);
 assert.match(releaseViewSource, /if \(server && !server\.is_active\)[\s\S]*?message\.warning\('该 Jenkins 实例已被禁用，请先启用后再选择。'\)[\s\S]*?task\.server_id = null;[\s\S]*?return;/);
-assert.match(releaseViewSource, /err\.response\?\.data\?\.detail \|\| '未获取到分支列表，可手动输入分支或 Tag。'/);
+assert.match(releaseViewSource, /err\.response\?\.data\?\.detail \|\| '未获取到分支列表/);
 assert.match(releaseViewSource, /@click="setQuickExecuteTime\(21, 30\)"[^>]*>21:30<\/n-button>/);
 assert.match(releaseViewSource, /@click="setQuickExecuteTime\(22, 0\)"[^>]*>22:00<\/n-button>/);
 assert.match(releaseViewSource, /function setQuickExecuteTime\(hour: number, minute: number\)/);
@@ -30,10 +30,9 @@ assert.match(configSource, /v-model:value="planRetention"/);
 assert.match(configSource, /config_key: 'plan_retention_days'/);
 assert.match(configSource, /const planRetention = ref<number \| null>\(30\)/);
 
+assert.match(detailSource, /function retryTask\(task: ReleaseTask\)/);
 for (const viewSource of [releaseViewSource, dashboardSource]) {
-  assert.match(viewSource, /depends_on_sequence: .*PIPELINE.*index > 0.*index - 1.*null/);
-  assert.match(viewSource, /retryType = plan\.type === 'PIPELINE' \? 'PIPELINE' : 'IMMEDIATE'/);
-  assert.match(viewSource, /\/release\/plans\/\$\{response\.data\.id\}\/trigger/);
+  assert.match(viewSource, /\/release\/plans\/\$\{(plan|response\.data)\.id\}\/trigger/);
 }
 assert.doesNotMatch(releaseViewSource, /getDependencyOptions/);
 
@@ -79,6 +78,10 @@ const {
 
 assert.equal(getStatusMeta('SUCCESS').tone, 'success');
 assert.equal(getStatusMeta('RUNNING').label, '运行中');
+assert.equal(getStatusMeta('RUNNING', null).label, '排队中');
+assert.equal(getStatusMeta('RUNNING', 12).label, '构建中');
+assert.equal(getStatusMeta('QUEUED').label, '排队中');
+assert.equal(getStatusMeta('BUILDING').label, '构建中');
 assert.equal(getPreflightMeta('FAILED').label, '未通过');
 assert.equal(getPreflightMeta('FAILED').tone, 'danger');
 assert.deepEqual({ ...getPreflightMeta('WARNING') }, { label: '警告', tone: 'warning' });

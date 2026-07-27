@@ -129,8 +129,8 @@
     <n-modal v-model:show="runModalVisible" preset="card" title="运行 Job" style="width: min(560px, 94vw)">
       <n-form label-placement="left" label-width="90">
         <n-form-item label="Job"><strong>{{ activeJob?.name }}</strong></n-form-item>
-        <n-form-item label="分支/Tag" required>
-          <n-select v-model:value="runBranch" :options="branchOptions" filterable tag placeholder="选择或输入分支" />
+        <n-form-item label="分支/Tag" required feedback="提示：支持下拉选择已有分支，也可直接在此输入分支/Tag名称">
+          <n-select v-model:value="runBranch" :options="branchOptions" filterable tag placeholder="选择分支或手动输入分支/Tag" />
         </n-form-item>
       </n-form>
       <template #action>
@@ -171,7 +171,7 @@ import StatusBadge from '../../components/StatusBadge.vue';
 import BackupDrawer from './BackupDrawer.vue';
 import request from '../../utils/request';
 import { encryptData } from '../../utils/crypto';
-import { formatDateTime, isPreflightBlocked } from '../../utils/release-ui';
+import { formatDateTime } from '../../utils/release-ui';
 
 interface JenkinsServer {
   id: number;
@@ -471,46 +471,31 @@ async function openRunModal(job: JenkinsJob) {
     branchOptions.value = (res.data || []).map((branch: string) => ({ label: branch, value: branch }));
     runBranch.value = branchOptions.value[0]?.value || '';
   } catch (err: any) {
-    message.warning(err.message || '分支加载失败，可手动输入。');
+    message.warning(err.message || '未获取到远程分支列表，您可以直接手动输入分支或 Tag。');
   }
 }
 
 async function submitQuickRun() {
   if (!activeJob.value || !runBranch.value) {
-    message.error('请填写分支或 Tag。');
+    message.error('请选择或手动输入要调度的分支/Tag。');
     return;
   }
   submitLoading.value = true;
   try {
-    const response = await request.post('/release/plans', {
-      name: `Run ${activeJob.value.name}`,
-      type: 'IMMEDIATE',
-      execute_time: null,
-      interval_minutes: 0,
-      pipeline_failure_strategy: 'STOP',
-      tasks: [{
-        server_id: activeJob.value.server_id,
-        job_id: activeJob.value.id,
-        branch: runBranch.value,
-        parameters: {},
-        sequence: 0,
-        depends_on_sequence: null,
-      }],
+    const jobName = activeJob.value.name;
+    const response = await request.post(`/jenkins/servers/${activeJob.value.server_id}/jobs/${activeJob.value.id}/run`, {
+      branch: runBranch.value,
+      parameters: {}
     });
-    const status = response.data.preflight_status;
-    if (isPreflightBlocked(status) || status === 'WARNING') {
-      runModalVisible.value = false;
-      await router.push(`/release/${response.data.id}`);
-      if (isPreflightBlocked(status)) {
-        message.error('计划已创建，但发布前检查未通过，请到发布计划页面处理');
-      } else {
-        message.warning('计划已创建，预检存在警告，请到发布计划页面确认后运行');
-      }
-      return;
-    }
-    message.success('已创建立即执行任务。');
+    message.success(response.data.message || '构建已成功触发，正在跳转到日志页面...');
     runModalVisible.value = false;
-    router.push('/release');
+    await router.push({
+      path: '/history',
+      query: {
+        tab: 'external',
+        job: jobName
+      }
+    });
   } catch (err: any) {
     message.error(err.message || '运行失败。');
   } finally {

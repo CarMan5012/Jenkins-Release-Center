@@ -5,7 +5,7 @@ from datetime import datetime
 class ReleaseTaskCreate(BaseModel):
     server_id: int
     job_id: Optional[int] = None
-    job_name: str
+    job_name: Optional[str] = None
     branch: str
     parameters: Optional[Dict[str, Any]] = None
     sequence: int = 0

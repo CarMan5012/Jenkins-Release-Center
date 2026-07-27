@@ -7,8 +7,8 @@
       </div>
       <div class="header-actions">
         <n-button secondary @click="router.push('/release')">返回列表</n-button>
-        <n-button secondary :disabled="!plan" :loading="preflightLoading" @click="preflightPlan">发布前检查</n-button>
-        <n-button type="primary" :disabled="plan?.status !== 'WAITING' || preflightLoading || isPreflightBlocked(plan?.preflight_status)" :title="isPreflightBlocked(plan?.preflight_status) ? '请先完成并通过发布前检查' : undefined" :loading="busyKey === 'run'" @click="triggerPlan">运行</n-button>
+        <n-button secondary :disabled="!plan || plan.status === 'RUNNING'" :loading="preflightLoading" @click="preflightPlan">检测</n-button>
+        <n-button type="primary" :disabled="plan?.status === 'RUNNING' || preflightLoading || isPreflightBlocked(plan?.preflight_status)" :title="isPreflightBlocked(plan?.preflight_status) ? '请先完成并通过检测' : undefined" :loading="busyKey === 'run'" @click="triggerPlan">运行</n-button>
         <n-button type="warning" secondary :disabled="!plan || !['WAITING', 'RUNNING'].includes(plan.status)" :loading="busyKey === 'stop'" @click="cancelPlan">停止</n-button>
       </div>
     </div>
@@ -45,12 +45,13 @@
         </div>
         <div>
           <span class="summary-label">预检状态</span>
-          <n-tag size="small" :type="preflightTagType(plan.preflight_status)">{{ getPreflightMeta(plan.preflight_status).label }}</n-tag>
-          <span class="muted mono">{{ formatDateTime(plan.preflight_checked_at) }}</span>
+          <div>
+            <n-tag size="small" :type="preflightTagType(plan.preflight_status)">{{ getPreflightMeta(plan.preflight_status).label }}</n-tag>
+          </div>
         </div>
       </div>
 
-      <PreflightResult :result="plan.preflight_result" :checked-at="plan.preflight_checked_at" />
+      <PreflightResult :result="plan.preflight_result" :checked-at="plan.preflight_checked_at" :collapsible="true" />
 
       <n-tabs v-model:value="activeTab" type="segment" animated>
         <n-tab-pane name="overview" tab="概览">
@@ -77,18 +78,32 @@
                     <td>
                       <div class="cell-title">
                         <strong>{{ task.job_name }}</strong>
-                        <span class="muted mono">server #{{ task.server_id }} · job #{{ task.job_id }}</span>
                       </div>
                     </td>
                     <td class="mono">{{ task.branch }}</td>
-                    <td><StatusBadge :status="task.status" /></td>
+                    <td>
+                      <StatusBadge :status="task.status" :build-number="task.build_number" />
+                      <span v-if="['QUEUED', 'RUNNING'].includes(task.status) && !task.build_number && task.error_message" class="muted text-xs block" :title="task.error_message">
+                        {{ task.error_message }}
+                      </span>
+                    </td>
                     <td class="mono">{{ task.build_number || '-' }}</td>
                     <td class="mono">{{ formatDuration(task.duration) }}</td>
                     <td>
                       <div style="display: flex; gap: 6px; align-items: center;">
                         <n-button size="tiny" secondary @click="showLog(task.id, null)">查看日志</n-button>
+                        <n-button
+                          v-if="['FAILED', 'FAILURE', 'UNSTABLE', 'CANCELLED'].includes(task.status) && plan?.status !== 'RUNNING'"
+                          size="tiny"
+                          type="warning"
+                          secondary
+                          :loading="retryTaskLoading === task.id"
+                          @click="retryTask(task)"
+                        >
+                          重试任务
+                        </n-button>
                         <RefreshButton
-                          v-if="['RUNNING', 'FAILED'].includes(task.status) && task.build_number" 
+                          v-if="['QUEUED', 'BUILDING', 'RUNNING', 'FAILED', 'FAILURE', 'UNSTABLE', 'CANCELLED'].includes(task.status)" 
                           size="tiny" 
                           type="info"
                           secondary 
@@ -231,6 +246,7 @@ interface ReleaseTask {
   depends_on_task_id?: number | null;
   status: string;
   build_number?: number | null;
+  error_message?: string | null;
   duration: number;
   started_at?: string | null;
   finished_at?: string | null;
@@ -284,6 +300,7 @@ const dialog = useDialog();
 const loading = ref(true);
 const historyLoading = ref(false);
 const syncingTaskId = ref<number | null>(null);
+const retryTaskLoading = ref<number | null>(null);
 const busyKey = ref('');
 const preflightLoading = ref(false);
 const error = ref('');
@@ -399,7 +416,7 @@ function triggerPlan() {
   if (!plan.value) return;
   if (preflightLoading.value) return;
   if (isPreflightBlocked(plan.value.preflight_status)) {
-    message.warning('请先完成并通过发布前检查。');
+    message.warning('请先完成并通过检测。');
     return;
   }
   const execute = () => runAction('run', async () => {
@@ -408,15 +425,21 @@ function triggerPlan() {
   });
   if (plan.value.preflight_status === 'WARNING') {
     dialog.warning({
-      title: '预检存在警告',
-      content: '最近一次检查存在临时性问题，仍要运行吗？',
+      title: '检测存在警告',
+      content: `计划 [${plan.value.name}] 检测存在警告，是否现在立即运行？`,
       positiveText: '仍然运行',
       negativeText: '取消',
       onPositiveClick: execute,
     });
     return;
   }
-  execute();
+  dialog.info({
+    title: '运行确认',
+    content: `是否现在立即运行发布计划 [${plan.value.name}]？`,
+    positiveText: '立即运行',
+    negativeText: '取消',
+    onPositiveClick: execute,
+  });
 }
 
 async function preflightPlan() {
@@ -425,9 +448,9 @@ async function preflightPlan() {
   try {
     const response = await request.post(`/release/plans/${plan.value?.id}/preflight`);
     plan.value = response.data;
-    message.success('发布前检查已完成。');
+    message.success('检测已完成。');
   } catch (err: any) {
-    message.error(err.message || '发布前检查失败。');
+    message.error(err.message || '检测失败。');
   } finally {
     preflightLoading.value = false;
   }
@@ -447,6 +470,39 @@ function cancelPlan() {
   });
 }
 
+async function retryTask(task: ReleaseTask) {
+  if (!plan.value) return;
+  if (isPreflightBlocked(plan.value.preflight_status)) {
+    message.warning('请先完成并通过检测。');
+    return;
+  }
+  const execute = async () => {
+    retryTaskLoading.value = task.id;
+    try {
+      await request.post(`/release/plans/${plan.value!.id}/tasks/${task.id}/retry`);
+      message.success(`已重置并单独触发任务 [${task.job_name}] 执行。`);
+      await loadPlan();
+    } catch (err: any) {
+      message.error(err.message || '任务重试失败。');
+    } finally {
+      retryTaskLoading.value = null;
+    }
+  };
+
+  if (plan.value.preflight_status === 'WARNING') {
+    dialog.warning({
+      title: '预检存在警告',
+      content: `预检存在警告，仍要单独重试任务 [${task.job_name}] 吗？`,
+      positiveText: '仍然重试',
+      negativeText: '取消',
+      onPositiveClick: execute,
+    });
+    return;
+  }
+
+  await execute();
+}
+
 function timelineType(status: string): 'success' | 'error' | 'warning' | 'info' | 'default' {
   if (status === 'SUCCESS') return 'success';
   if (status === 'FAILED') return 'error';
@@ -455,9 +511,40 @@ function timelineType(status: string): 'success' | 'error' | 'warning' | 'info' 
   return 'default';
 }
 
+let pollTimer: any = null;
+
+async function fetchPlanSilent() {
+  try {
+    const res = await request.get(`/release/plans/${route.params.id}`);
+    plan.value = res.data;
+  } catch (e) {
+    // 静默轮询
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(() => {
+    fetchPlanSilent();
+  }, 3500);
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
 onMounted(async () => {
   await loadPlan();
   await loadHistory();
+  startPolling();
+});
+
+import { onUnmounted } from 'vue';
+onUnmounted(() => {
+  stopPolling();
 });
 </script>
 
