@@ -14,13 +14,13 @@ class SafeSession(requests.Session):
         from urllib.parse import urlparse
         orig_parsed = urlparse(resp.url)
         orig_origin = f"{orig_parsed.scheme}://{orig_parsed.netloc}"
-        
+
         for redirect_resp in super().resolve_redirects(resp, req, **kwargs):
             if hasattr(redirect_resp, "url"):
                 target_url = redirect_resp.url
             else:
                 target_url = redirect_resp.req.url
-                
+
             target_parsed = urlparse(target_url)
             target_origin = f"{target_parsed.scheme}://{target_parsed.netloc}"
             if target_origin != orig_origin:
@@ -45,8 +45,8 @@ class JenkinsClient:
         self.session.auth = self.auth
         # Standard retries for network resilience
         adapter = requests.adapters.HTTPAdapter(
-            pool_connections=10, 
-            pool_maxsize=20, 
+            pool_connections=10,
+            pool_maxsize=20,
             max_retries=3
         )
         self.session.mount("http://", adapter)
@@ -103,9 +103,9 @@ class JenkinsClient:
         return response.json().get("jobs", [])
 
     def trigger_build(
-        self, 
-        job_name: str, 
-        parameters: Optional[Dict[str, Any]] = None, 
+        self,
+        job_name: str,
+        parameters: Optional[Dict[str, Any]] = None,
         branch: Optional[str] = None
     ) -> str:
         """
@@ -113,11 +113,11 @@ class JenkinsClient:
         Returns the queue URL of the build.
         """
         job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
-        
+
         merged_params = {}
         if parameters:
             merged_params.update(parameters)
-            
+
         if branch:
             # 1. Try to find the exact Git Parameter name configured in Jenkins
             branch_param_name = "branch" # default fallback
@@ -133,7 +133,7 @@ class JenkinsClient:
                     for act in data.get("actions", []):
                         if act and "parameterDefinitions" in act:
                             definitions.extend(act["parameterDefinitions"])
-                            
+
                     for p in definitions:
                         p_class = p.get("_class") or p.get("type", "")
                         p_name = p.get("name")
@@ -142,9 +142,9 @@ class JenkinsClient:
                             break
             except Exception as e:
                 logger.debug(f"Failed to fetch parameter name for trigger_build: {str(e)}")
-                
+
             merged_params[branch_param_name] = branch
-            
+
         headers = self.get_crumb_headers()
         if merged_params:
             url = urljoin(self.base_url, f"{job_path}/buildWithParameters")
@@ -152,7 +152,7 @@ class JenkinsClient:
         else:
             url = urljoin(self.base_url, f"{job_path}/build")
             response = self.session.post(url, headers=headers, timeout=10)
-        
+
         if response.status_code in [200, 201]:
             location = response.headers.get("Location")
             if not location:
@@ -177,16 +177,16 @@ class JenkinsClient:
 
         # Ensure the queue URL points to our JSON API
         api_url = queue_url if queue_url.endswith('/') else queue_url + '/'
-        
+
         # Scheme alignment: if base_url is HTTPS but queue_url returned is HTTP (e.g. proxy configuration issue),
         # force HTTPS to avoid network block or redirect issues inside container.
         if self.base_url.startswith("https://") and api_url.startswith("http://"):
             api_url = "https://" + api_url[7:]
         elif self.base_url.startswith("http://") and api_url.startswith("https://"):
             api_url = "http://" + api_url[8:]
-            
+
         api_url = urljoin(api_url, "api/json")
-        
+
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
@@ -235,84 +235,155 @@ class JenkinsClient:
             }
         raise Exception(f"Failed to fetch build status: HTTP {response.status_code}")
 
+    def _parse_value_items(self, data: Any) -> List[str]:
+        """
+        Helper method to parse fillValueItems response from Jenkins.
+        Handles both List (ListBoxModel) and Dict structures.
+        """
+        results = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("values") or data.get("items") or data.get("choices") or []
+        else:
+            items = []
+
+        for item in items:
+            if isinstance(item, dict):
+                val = item.get("value") or item.get("name")
+                if val:
+                    results.append(str(val).strip())
+            elif isinstance(item, str) and item.strip():
+                results.append(item.strip())
+        return results
+
     def get_branches_and_tags(self, job_name: str) -> List[str]:
         """
         Dynamically query git branches/tags for a specific job.
-        Tries to dynamically detect Git Parameter definition from Job config,
-        then calls its descriptor endpoint. Fallbacks to default branch list.
+        Tries to dynamically detect ChoiceParameter, GitParameter, or StringParameter
+        definitions from Job config, then calls descriptor endpoints if needed.
+        Fallbacks gracefully.
         """
         job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
-        
-        # 1. Try to fetch the Job parameter definitions dynamically
-        git_params = []
+        discovered_branches: List[str] = []
+        git_params: List[Tuple[str, str]] = []
+
+        # 1. Try to fetch Job parameter definitions
         try:
-            url = urljoin(self.base_url, f"{job_path}/api/json?tree=property[parameterDefinitions[*]],actions[parameterDefinitions[*]]")
-            response = self.session.get(url, timeout=10)
+            url = urljoin(self.base_url, f"{job_path}/api/json")
+            response = self.session.get(url, params={"tree": "property[parameterDefinitions[*]],actions[parameterDefinitions[*]]"}, timeout=10)
+            if response.status_code != 200:
+                # Retry without tree constraint if strict tree failed
+                response = self.session.get(url, timeout=10)
+
             if response.status_code == 200:
                 data = response.json()
                 definitions = []
-                for prop in data.get("property", []):
-                    if prop and "parameterDefinitions" in prop:
-                        definitions.extend(prop["parameterDefinitions"])
-                for act in data.get("actions", []):
-                    if act and "parameterDefinitions" in act:
-                        definitions.extend(act["parameterDefinitions"])
-                        
+                for prop in (data.get("property") or []):
+                    if isinstance(prop, dict) and "parameterDefinitions" in prop:
+                        definitions.extend(prop["parameterDefinitions"] or [])
+                for act in (data.get("actions") or []):
+                    if isinstance(act, dict) and "parameterDefinitions" in act:
+                        definitions.extend(act["parameterDefinitions"] or [])
+
                 for p in definitions:
+                    if not isinstance(p, dict):
+                        continue
                     p_class = p.get("_class") or p.get("type", "")
-                    p_name = p.get("name")
-                    if p_name and ("gitparameter" in p_class.lower() or "git_parameter" in p_class.lower()):
-                        git_params.append((p_name, p_class))
+                    p_name = p.get("name", "")
+                    p_name_lower = p_name.lower()
+                    p_class_lower = p_class.lower()
+
+                    is_branch_related = any(k in p_name_lower for k in [
+                        "branch", "tag", "git", "version", "release"
+                    ]) or "gitparameter" in p_class_lower
+
+                    # A. Check ChoiceParameterDefinition or choices in dict
+                    choices = p.get("choices")
+                    if choices:
+                        if isinstance(choices, list):
+                            for c in choices:
+                                if isinstance(c, str) and c.strip():
+                                    discovered_branches.append(c.strip())
+                                elif isinstance(c, dict) and (c.get("value") or c.get("name")):
+                                    discovered_branches.append(str(c.get("value") or c.get("name")).strip())
+                        elif isinstance(choices, str):
+                            for line in choices.splitlines():
+                                line_clean = line.strip()
+                                if line_clean:
+                                    discovered_branches.append(line_clean)
+
+                    # B. Check String/Text Parameter default value
+                    default_val = None
+                    if "defaultparametervalue" in p:
+                        default_val = p.get("defaultparametervalue", {}).get("value")
+                    elif "defaultValue" in p:
+                        default_val = p.get("defaultValue")
+
+                    if default_val and is_branch_related:
+                        val_str = str(default_val).strip()
+                        if val_str and val_str not in discovered_branches:
+                            discovered_branches.append(val_str)
+
+                    # C. Check GitParameterDefinition for dynamic fillValueItems polling
+                    if is_branch_related or "gitparameter" in p_class_lower:
+                        if p_name:
+                            git_params.append((p_name, p_class))
+
         except Exception as e:
             logger.debug(f"Failed to fetch parameter definitions for job {job_name}: {str(e)}")
-            
-        # 2. If Git parameter definitions are found, query them using their actual classes
+
+        # 2. Query GitParameter definitions via fillValueItems descriptor
         if git_params:
             for p_name, p_class in git_params:
                 try:
                     endpoint = f"{job_path}/descriptorByName/{p_class}/fillValueItems"
                     url = urljoin(self.base_url, endpoint)
-                    response = self.session.get(url, params={"param": p_name}, timeout=10)
+                    response = self.session.get(url, params={"param": p_name, "job": job_name}, timeout=10)
                     if response.status_code == 200:
-                        data = response.json()
-                        values = data.get("values", [])
-                        if values:
-                            res = []
-                            for item in values:
-                                val = item.get("value")
-                                if val:
-                                    res.append(val)
-                            return res
+                        vals = self._parse_value_items(response.json())
+                        for v in vals:
+                            if v not in discovered_branches:
+                                discovered_branches.append(v)
                 except Exception as e:
-                    logger.debug(f"Git Parameter poll failed for parameter '{p_name}' using class '{p_class}': {str(e)}")
-                    
-        # 3. Fallback heuristic search if dynamic loading failed
-        potential_params = ["branch", "BRANCH", "tag", "TAG", "git_parameter", "GitParameter"]
-        potential_classes = [
-            "net.uaznia.lukanus.hudson.plugins.gitparameter.GitParameterDefinition",
-            "net.uaznia.lukanus.jenkins.plugins.gitparameter.GitParameterDefinition"
-        ]
-        for param in potential_params:
-            for p_class in potential_classes:
-                try:
-                    endpoint = f"{job_path}/descriptorByName/{p_class}/fillValueItems"
-                    url = urljoin(self.base_url, endpoint)
-                    response = self.session.get(url, params={"param": param}, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        values = data.get("values", [])
-                        if values:
-                            res = []
-                            for item in values:
-                                val = item.get("value")
-                                if val:
-                                    res.append(val)
-                            return res
-                except Exception as e:
-                    continue
-                    
-        # Default fallback branch values
-        return ["master", "develop", "release", "main"]
+                    logger.debug(f"Git Parameter poll failed for '{p_name}' using class '{p_class}': {str(e)}")
+
+        # 3. Fallback heuristic descriptor search if still empty
+        if not discovered_branches:
+            potential_params = ["branch", "BRANCH", "tag", "TAG", "git_parameter", "GitParameter"]
+            potential_classes = [
+                "net.uaznia.lukanus.hudson.plugins.gitparameter.GitParameterDefinition",
+                "net.uaznia.lukanus.jenkins.plugins.gitparameter.GitParameterDefinition"
+            ]
+            for param in potential_params:
+                for p_class in potential_classes:
+                    try:
+                        endpoint = f"{job_path}/descriptorByName/{p_class}/fillValueItems"
+                        url = urljoin(self.base_url, endpoint)
+                        response = self.session.get(url, params={"param": param, "job": job_name}, timeout=10)
+                        if response.status_code == 200:
+                            vals = self._parse_value_items(response.json())
+                            for v in vals:
+                                if v not in discovered_branches:
+                                    discovered_branches.append(v)
+                            if discovered_branches:
+                                break
+                    except Exception:
+                        continue
+                if discovered_branches:
+                    break
+
+        # Remove duplicates while preserving order
+        unique_branches = []
+        for b in discovered_branches:
+            if b and b not in unique_branches:
+                unique_branches.append(b)
+
+        # Final fallback default branches if none discovered
+        if not unique_branches:
+            unique_branches = ["master", "main", "develop", "release"]
+
+        return unique_branches
 
     def get_progressive_log(self, job_name: str, build_number: int, start: int = 0) -> Tuple[str, int, bool]:
         """

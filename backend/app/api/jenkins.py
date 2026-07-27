@@ -13,6 +13,7 @@ from app.core.security import encrypt_secret
 from app.api.deps import get_current_user, get_current_active_admin, get_current_active_operator, log_action
 from app.services.deps_helper import is_request_trusted_https, get_client_ip, validate_jenkins_url, normalize_idempotency_key
 from app.models.jenkins import JenkinsServer, JenkinsView, JenkinsJob, JenkinsBackup
+from app.models.release import ReleaseHistory
 from app.models.user import User
 from app.schemas.jenkins import (
     JenkinsServerCreate, JenkinsServerResponse, JenkinsServerUpdate,
@@ -393,8 +394,35 @@ def get_git_branches(
     if not server.is_active:
         raise HTTPException(status_code=400, detail="该 Jenkins 实例已被禁用，无法获取分支信息")
         
-    client = JenkinsClient(server.url, server.username, server.api_token)
-    return client.get_branches_and_tags(job.name)
+    branches: List[str] = []
+    try:
+        client = JenkinsClient(server.url, server.username, server.api_token)
+        branches = client.get_branches_and_tags(job.name)
+    except Exception:
+        branches = []
+
+    # Merge historical branches from ReleaseHistory if available
+    try:
+        history_rows = (
+            db.query(ReleaseHistory.branch)
+            .filter(ReleaseHistory.job_name == job.name)
+            .filter(ReleaseHistory.branch.isnot(None))
+            .distinct()
+            .all()
+        )
+        for row in history_rows:
+            b_val = row[0]
+            if b_val and isinstance(b_val, str) and b_val.strip():
+                clean_b = b_val.strip()
+                if clean_b not in branches:
+                    branches.append(clean_b)
+    except Exception:
+        pass
+
+    if not branches:
+        branches = ["master", "main", "develop", "release"]
+
+    return branches
 
 # ==========================================
 # Jenkins Server Jobs Configuration Backups

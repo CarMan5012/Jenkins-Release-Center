@@ -588,8 +588,12 @@ async function loadTaskJobs(serverId: number, viewId: number, index: number) {
 }
 
 async function loadTaskBranches(serverId: number, jobId: number, index: number) {
-  const res = await request.get(`/jenkins/servers/${serverId}/jobs/${jobId}/branches`);
-  taskBranchOptions.value[index] = (res.data || []).map((branch: string) => ({ label: branch, value: branch }));
+  try {
+    const res = await request.get(`/jenkins/servers/${serverId}/jobs/${jobId}/branches`);
+    taskBranchOptions.value[index] = (res.data || []).map((branch: string) => ({ label: branch, value: branch }));
+  } catch {
+    taskBranchOptions.value[index] = [];
+  }
 }
 
 async function onTaskServerChange(value: number, index: number) {

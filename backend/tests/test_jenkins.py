@@ -116,3 +116,67 @@ def test_plaintext_backup_routes_require_admin():
             dependency.call is get_current_active_admin
             for dependency in route.dependant.dependencies
         )
+
+
+@patch('requests.Session.get')
+def test_get_branches_and_tags_choice_param(mock_get):
+    """
+    Verify get_branches_and_tags extracts choices from ChoiceParameterDefinition.
+    """
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "property": [
+            {
+                "parameterDefinitions": [
+                    {
+                        "_class": "hudson.model.ChoiceParameterDefinition",
+                        "name": "BRANCH",
+                        "choices": ["master", "feature/login", "release/v1.0"]
+                    }
+                ]
+            }
+        ]
+    }
+    mock_get.return_value = mock_resp
+
+    client = JenkinsClient("http://localhost:8080", "admin", "token123")
+    branches = client.get_branches_and_tags("my-job")
+    assert branches == ["master", "feature/login", "release/v1.0"]
+
+
+@patch('requests.Session.get')
+def test_get_branches_and_tags_list_json_response(mock_get):
+    """
+    Verify get_branches_and_tags handles fillValueItems List JSON response without AttributeError.
+    """
+    # 1st call for api/json returns GitParameter definition
+    api_resp = MagicMock()
+    api_resp.status_code = 200
+    api_resp.json.return_value = {
+        "actions": [
+            {
+                "parameterDefinitions": [
+                    {
+                        "_class": "net.uaznia.lukanus.hudson.plugins.gitparameter.GitParameterDefinition",
+                        "name": "git_branch"
+                    }
+                ]
+            }
+        ]
+    }
+
+    # 2nd call for fillValueItems returns standard ListBoxModel List format: [{"name": "...", "value": "..."}]
+    fill_resp = MagicMock()
+    fill_resp.status_code = 200
+    fill_resp.json.return_value = [
+        {"name": "origin/master", "value": "origin/master"},
+        {"name": "origin/dev", "value": "origin/dev"}
+    ]
+
+    mock_get.side_effect = [api_resp, fill_resp]
+
+    client = JenkinsClient("http://localhost:8080", "admin", "token123")
+    branches = client.get_branches_and_tags("my-job")
+    assert "origin/master" in branches
+    assert "origin/dev" in branches
