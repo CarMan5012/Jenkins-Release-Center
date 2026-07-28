@@ -2,6 +2,7 @@ import os
 
 os.environ["APP_ENV"] = "development"
 
+import pytest
 from sqlalchemy import create_engine, inspect, text
 
 
@@ -42,6 +43,35 @@ def test_legacy_schema_upgrade_is_idempotent_and_deduplicates_builds():
             "SELECT server_id, task_id FROM release_history ORDER BY server_id"
         )).all()
     assert [tuple(row) for row in rows] == [(1, 10), (2, None)]
-    assert "uix_release_history_build_identity" in {
-        index["name"] for index in inspect(engine).get_indexes("release_history")
-    }
+    target_index = next(
+        index
+        for index in inspect(engine).get_indexes("release_history")
+        if index["name"] == "uix_release_history_build_identity"
+    )
+    assert target_index["unique"]
+    assert target_index["column_names"] == ["server_id", "job_name", "build_number"]
+
+
+def test_schema_upgrade_rejects_same_name_non_unique_index():
+    from app.services.init_db import ensure_jenkins_consistency_schema
+
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE jenkins_server (id INTEGER PRIMARY KEY, name VARCHAR(100))"))
+        connection.execute(text("CREATE TABLE release_task (id INTEGER PRIMARY KEY, build_number INTEGER)"))
+        connection.execute(text(
+            "CREATE TABLE release_history ("
+            "id INTEGER PRIMARY KEY, task_id INTEGER, server_id INTEGER, "
+            "server_name VARCHAR(100), job_name VARCHAR(150), "
+            "build_number INTEGER, status VARCHAR(30))"
+        ))
+        connection.execute(text(
+            "CREATE INDEX uix_release_history_build_identity "
+            "ON release_history (server_id, job_name, build_number)"
+        ))
+
+    with pytest.raises(
+        RuntimeError,
+        match="Index uix_release_history_build_identity conflicts",
+    ):
+        ensure_jenkins_consistency_schema(engine)

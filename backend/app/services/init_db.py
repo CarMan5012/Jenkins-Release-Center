@@ -77,19 +77,36 @@ def ensure_jenkins_consistency_schema(engine) -> None:
             )
 
     inspector = inspect(engine)
-    existing_indexes = {
-        index["name"] for index in inspector.get_indexes("release_history")
-    }
-    existing_indexes.update(
-        constraint["name"]
+    index_name = "uix_release_history_build_identity"
+    expected_columns = ["server_id", "job_name", "build_number"]
+    existing_indexes = inspector.get_indexes("release_history")
+    existing_indexes.extend(
+        {
+            "name": constraint["name"],
+            "unique": True,
+            "column_names": constraint["column_names"],
+        }
         for constraint in inspector.get_unique_constraints("release_history")
     )
-    if "uix_release_history_build_identity" not in existing_indexes:
-        with engine.begin() as connection:
-            connection.execute(text(
-                "CREATE UNIQUE INDEX uix_release_history_build_identity "
-                "ON release_history (server_id, job_name, build_number)"
-            ))
+    matching_indexes = [
+        index for index in existing_indexes if index["name"] == index_name
+    ]
+    if matching_indexes:
+        if any(
+            not index.get("unique")
+            or index.get("column_names") != expected_columns
+            for index in matching_indexes
+        ):
+            raise RuntimeError(
+                f"Index {index_name} conflicts with required unique Jenkins build identity"
+            )
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE UNIQUE INDEX uix_release_history_build_identity "
+            "ON release_history (server_id, job_name, build_number)"
+        ))
 
 def init_db() -> None:
     # 1. Create tables if they do not exist
