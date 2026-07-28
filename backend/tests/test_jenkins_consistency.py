@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 os.environ["APP_ENV"] = "development"
 
@@ -94,6 +94,30 @@ def test_reconcile_uses_queue_executable_without_recent_build_scan():
     assert release_service.resolve_task_build_number(db, task, client) == 42
     assert task.build_number == 42
     client.get_recent_builds.assert_not_called()
+
+
+
+def test_reconcile_does_not_restore_cancelled_task_to_building():
+    db, task = session_with_reconcile_task(
+        status="BUILDING",
+        build_number=42,
+        jenkins_queue_id=1001,
+    )
+    client = MagicMock()
+
+    def cancel_then_report_building(_job_name, _build_number):
+        task.status = "CANCELLED"
+        db.commit()
+        return {"building": True}
+
+    client.get_build_status.side_effect = cancel_then_report_building
+    with patch.object(release_service, "JenkinsClient", return_value=client):
+        assert release_service.reconcile_single_task(db, task.id) is False
+
+    db.refresh(task)
+    assert task.status == "CANCELLED"
+
+
 def test_jenkins_primitives_extract_queue_id():
     client = jenkins_client.JenkinsClient(
         "https://jenkins.example/", "admin", "token"

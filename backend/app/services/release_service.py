@@ -124,7 +124,19 @@ def reconcile_single_task(db: Session, task_id: int) -> bool:
         status_info = client.get_build_status(task.job_name, task.build_number)
         
         if status_info.get("building") is True:
-            task.status = "BUILDING"
+            result = db.execute(
+                update(ReleaseTask)
+                .where(
+                    ReleaseTask.id == task.id,
+                    ReleaseTask.status.in_(ACTIVE_TASK_STATUSES),
+                )
+                .values(status="BUILDING")
+                .execution_options(synchronize_session=False)
+            )
+            db.commit()
+            db.refresh(task)
+            if result.rowcount != 1:
+                return False
             db.commit()
             return True
             
@@ -291,7 +303,8 @@ def execute_task_workflow(plan_id: int, task_id: int):
                 time.sleep(retry_delay)
 
         # 4. Resolve Queue item to Build Number (State: QUEUED)
-        task.jenkins_queue_id = client.extract_queue_id(queue_url)
+        queue_id = client.extract_queue_id(queue_url)
+        task.jenkins_queue_id = queue_id
         task.status = "QUEUED"
         task.error_message = None
         db.commit()
@@ -323,25 +336,56 @@ def execute_task_workflow(plan_id: int, task_id: int):
                 return
             raise q_err
         
-        task.build_number = int(build_number)
+        build_number = int(build_number)
+        build_claim = db.execute(
+            update(ReleaseTask)
+            .where(
+                ReleaseTask.id == task.id,
+                ReleaseTask.jenkins_queue_id == queue_id,
+                ReleaseTask.build_number.is_(None),
+            )
+            .values(build_number=build_number)
+            .execution_options(synchronize_session=False)
+        )
         db.commit()
         db.refresh(task)
-        if task.status == "CANCELLED":
-            logger.info(
-                f"Task {task_id} was cancelled while queued. "
-                f"Stopping Jenkins build #{build_number}."
-            )
-            client.stop_build(task.job_name, build_number)
+        if build_claim.rowcount != 1 and (
+            task.jenkins_queue_id != queue_id
+            or task.build_number != build_number
+        ):
             return
 
         # 5. Transition to BUILDING state
         job_path = "/".join([f"job/{part}" for part in task.job_name.split("/")])
-        task.status = "BUILDING"
-        task.started_at = datetime.now()
-        task.error_message = None
-        task.build_url = f"{server.url.rstrip('/')}/{job_path}/{build_number}/"
-        task.console_url = f"{server.url.rstrip('/')}/{job_path}/{build_number}/console"
+        build_url = f"{server.url.rstrip('/')}/{job_path}/{build_number}/"
+        console_url = f"{server.url.rstrip('/')}/{job_path}/{build_number}/console"
+        building_claim = db.execute(
+            update(ReleaseTask)
+            .where(
+                ReleaseTask.id == task.id,
+                ReleaseTask.status.in_(ACTIVE_TASK_STATUSES),
+                ReleaseTask.jenkins_queue_id == queue_id,
+                ReleaseTask.build_number == build_number,
+            )
+            .values(
+                status="BUILDING",
+                started_at=datetime.now(),
+                error_message=None,
+                build_url=build_url,
+                console_url=console_url,
+            )
+            .execution_options(synchronize_session=False)
+        )
         db.commit()
+        db.refresh(task)
+        if building_claim.rowcount != 1:
+            if (
+                task.status == "CANCELLED"
+                and task.jenkins_queue_id == queue_id
+                and task.build_number == build_number
+            ):
+                client.stop_build(task.job_name, build_number)
+            return
 
         send_release_notification(task.id, "start")
 

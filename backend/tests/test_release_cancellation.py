@@ -2,7 +2,7 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from fastapi import Request
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, update
 from sqlalchemy.orm import sessionmaker
 
 from app.api.release import cancel_plan
@@ -123,6 +123,66 @@ def test_cancelled_while_queued_stops_build_after_number_is_resolved():
     assert resolved_task.status == "CANCELLED"
     assert resolved_task.build_number == 43
     assert resolved_task.jenkins_queue_id == 1
+
+
+def test_cancelled_during_building_transition_is_not_reactivated():
+    db, _user, plan, task = session_with_running_task()
+    plan.status = "WAITING"
+    task.status = "WAITING"
+    task.build_number = None
+    db.commit()
+
+    client = MagicMock()
+    client.trigger_build.return_value = "http://jenkins.example/queue/item/1/"
+    client.extract_queue_id.return_value = 1
+    client.get_build_number_from_queue.return_value = 43
+    client.get_build_status.return_value = {
+        "building": False,
+        "result": "SUCCESS",
+        "duration": 1,
+    }
+
+    real_execute = db.execute
+    building_update_seen = False
+
+    def cancel_before_building_update(statement, *args, **kwargs):
+        nonlocal building_update_seen
+        values = getattr(statement, "_values", {})
+        target_status = next(
+            (
+                getattr(value, "value", None)
+                for column, value in values.items()
+                if getattr(column, "name", None) == "status"
+            ),
+            None,
+        )
+        if target_status == "BUILDING":
+            building_update_seen = True
+            real_execute(
+                update(ReleaseTask)
+                .where(ReleaseTask.id == task.id)
+                .values(status="CANCELLED")
+            )
+            db.commit()
+        return real_execute(statement, *args, **kwargs)
+
+    db.execute = MagicMock(side_effect=cancel_before_building_update)
+    with (
+        patch("app.services.release_service.SyncSessionLocal", return_value=db),
+        patch("app.services.release_service.JenkinsClient", return_value=client),
+        patch("app.services.release_service.send_release_notification"),
+        patch("app.services.release_service.write_history"),
+        patch("app.services.release_service.handle_pipeline_success"),
+    ):
+        execute_task_workflow(plan.id, task.id)
+
+    db.expire_all()
+    resolved_task = db.get(ReleaseTask, task.id)
+    assert building_update_seen is True
+    assert resolved_task.status == "CANCELLED"
+    assert resolved_task.build_number == 43
+    client.stop_build.assert_called_once_with("deploy", 43)
+
 
 
 def test_retry_plan_immediately_in_place():
