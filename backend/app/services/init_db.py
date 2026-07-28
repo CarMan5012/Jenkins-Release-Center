@@ -4,7 +4,7 @@ from app.core.config import settings
 from app.models.user import User
 from loguru import logger
 
-from sqlalchemy import inspect, text
+from sqlalchemy import bindparam, inspect, text
 
 
 def ensure_release_plan_preflight_columns(engine) -> None:
@@ -23,6 +23,74 @@ def ensure_release_plan_preflight_columns(engine) -> None:
             if name not in columns:
                 connection.execute(text(f"ALTER TABLE release_plan ADD COLUMN {name} {definition}"))
 
+
+def ensure_jenkins_consistency_schema(engine) -> None:
+    inspector = inspect(engine)
+    release_task_columns = {
+        column["name"] for column in inspector.get_columns("release_task")
+    }
+    release_history_columns = {
+        column["name"] for column in inspector.get_columns("release_history")
+    }
+
+    with engine.begin() as connection:
+        if "jenkins_queue_id" not in release_task_columns:
+            connection.execute(text(
+                "ALTER TABLE release_task ADD COLUMN jenkins_queue_id INTEGER NULL"
+            ))
+        if "server_id" not in release_history_columns:
+            connection.execute(text(
+                "ALTER TABLE release_history ADD COLUMN server_id INTEGER NULL"
+            ))
+
+        connection.execute(text(
+            "UPDATE release_history SET server_id = ("
+            "SELECT MIN(jenkins_server.id) FROM jenkins_server "
+            "WHERE jenkins_server.name = release_history.server_name"
+            ") WHERE server_id IS NULL AND server_name IN ("
+            "SELECT name FROM jenkins_server GROUP BY name HAVING COUNT(*) = 1"
+            ")"
+        ))
+
+        rows = connection.execute(text(
+            "SELECT id, server_id, job_name, build_number, task_id "
+            "FROM release_history WHERE server_id IS NOT NULL "
+            "ORDER BY server_id, job_name, build_number, "
+            "CASE WHEN task_id IS NOT NULL THEN 0 ELSE 1 END, id DESC"
+        ))
+        seen = set()
+        duplicate_ids = []
+        for row in rows:
+            identity = (row.server_id, row.job_name, row.build_number)
+            if row.job_name is None or row.build_number is None:
+                continue
+            if identity in seen:
+                duplicate_ids.append(row.id)
+            else:
+                seen.add(identity)
+
+        if duplicate_ids:
+            connection.execute(
+                text("DELETE FROM release_history WHERE id IN :duplicate_ids")
+                .bindparams(bindparam("duplicate_ids", expanding=True)),
+                {"duplicate_ids": duplicate_ids},
+            )
+
+    inspector = inspect(engine)
+    existing_indexes = {
+        index["name"] for index in inspector.get_indexes("release_history")
+    }
+    existing_indexes.update(
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("release_history")
+    )
+    if "uix_release_history_build_identity" not in existing_indexes:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE UNIQUE INDEX uix_release_history_build_identity "
+                "ON release_history (server_id, job_name, build_number)"
+            ))
+
 def init_db() -> None:
     # 1. Create tables if they do not exist
     logger.info("Initializing database tables...")
@@ -32,6 +100,7 @@ def init_db() -> None:
         # APScheduler table is automatically created by SQLAlchemyJobStore on start.
         Base.metadata.create_all(bind=sync_engine)
         ensure_release_plan_preflight_columns(sync_engine)
+        ensure_jenkins_consistency_schema(sync_engine)
         logger.info("Database tables created or verified.")
 
         if sync_engine.dialect.name == "mysql":

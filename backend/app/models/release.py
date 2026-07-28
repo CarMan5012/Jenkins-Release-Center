@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any, Optional
-from sqlalchemy import String, Integer, DateTime, Text, ForeignKey, JSON
+from sqlalchemy import String, Integer, DateTime, Text, ForeignKey, JSON, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -40,6 +40,7 @@ class ReleaseTask(Base):
     depends_on_task_id: Mapped[int] = mapped_column(Integer, ForeignKey("release_task.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="WAITING", nullable=False) # WAITING, QUEUED, BUILDING, RUNNING, SUCCESS, FAILED, UNSTABLE, SKIPPED, CANCELLED
     build_number: Mapped[int] = mapped_column(Integer, nullable=True)
+    jenkins_queue_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     console_url: Mapped[str] = mapped_column(String(255), nullable=True)
     build_url: Mapped[str] = mapped_column(String(255), nullable=True)
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
@@ -67,10 +68,19 @@ from sqlalchemy.dialects.mysql import LONGTEXT
 
 class ReleaseHistory(Base):
     __tablename__ = "release_history"
+    __table_args__ = (
+        UniqueConstraint(
+            "server_id",
+            "job_name",
+            "build_number",
+            name="uix_release_history_build_identity",
+        ),
+    )
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     task_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("release_task.id", ondelete="CASCADE"), nullable=True)
     plan_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("release_plan.id", ondelete="CASCADE"), nullable=True)
+    server_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     server_name: Mapped[str] = mapped_column(String(100), nullable=True)
     job_name: Mapped[str] = mapped_column(String(150), nullable=True)
     branch: Mapped[str] = mapped_column(String(150), nullable=True)

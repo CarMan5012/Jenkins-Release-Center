@@ -38,6 +38,7 @@ class ReleaseTaskResponse(BaseModel):
     depends_on_task_id: Optional[int] = None
     status: str
     build_number: Optional[int] = None
+    jenkins_queue_id: Optional[int] = None
     console_url: Optional[str] = None
     build_url: Optional[str] = None
     error_message: Optional[str] = None
@@ -75,6 +76,7 @@ class ReleaseHistoryResponse(BaseModel):
     id: int
     task_id: Optional[int] = None
     plan_id: Optional[int] = None
+    server_id: Optional[int] = None
     server_name: Optional[str] = None
     job_name: Optional[str] = None
     branch: Optional[str] = None
