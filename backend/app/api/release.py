@@ -505,6 +505,10 @@ def preflight_plan(
             if t.status == "FAILED":
                 t.status = "WAITING"
                 t.error_message = None
+                t.jenkins_queue_id = None
+                t.build_number = None
+                t.build_url = None
+                t.console_url = None
         db.commit()
         db.refresh(plan)
     return _run_preflight_safely(db, plan, plan.preflight_revision)
@@ -538,23 +542,11 @@ def cancel_plan(
             if server:
                 client = JenkinsClient(server.url, server.username, server.api_token)
                 # 1. 尝试停止记录在案的构建号
-                if t.build_number:
+                if t.build_number is not None:
                     try:
                         client.stop_build(t.job_name, t.build_number)
                     except Exception as error:
                         logger.warning(f"停止记录的 Jenkins 构建 #{t.build_number} 失败: {error}")
-                # 2. 终极自愈保护：扫描并强行终止 Jenkins 端该 Job 上正在运行的真实活跃构建 (防构建号错位卡死)
-                try:
-                    recent = client.get_recent_builds(t.job_name, limit=5)
-                    for b in recent:
-                        if b.get("status") == "BUILDING":
-                            try:
-                                client.stop_build(t.job_name, b["number"])
-                                logger.info(f"强行停止 Jenkins 上真实的活跃构建 #{b['number']}")
-                            except Exception:
-                                pass
-                except Exception as scan_err:
-                    logger.warning(f"扫描真实活跃构建失败: {scan_err}")
 
             scheduler_manager.remove_release_job(plan.id, t.id)
             t.status = "CANCELLED"
@@ -613,6 +605,10 @@ def trigger_plan_immediately(
         if t.status != "RUNNING":
             t.status = "WAITING"
             t.error_message = None
+            t.jenkins_queue_id = None
+            t.build_number = None
+            t.build_url = None
+            t.console_url = None
     db.commit()
     db.refresh(plan)
 
@@ -662,6 +658,14 @@ def retry_plan_immediately(
             raise HTTPException(status_code=400, detail=f"无法运行发布计划，任务绑定的 Jenkins 实例 [{server.name}] 已被禁用")
 
     plan.status = "RUNNING"
+    for t in plan.tasks:
+        t.status = "WAITING"
+        t.error_message = None
+        t.finished_at = None
+        t.jenkins_queue_id = None
+        t.build_number = None
+        t.build_url = None
+        t.console_url = None
     db.commit()
     db.refresh(plan)
 
@@ -716,6 +720,10 @@ def retry_single_task(
     task.status = "WAITING"
     task.error_message = None
     task.finished_at = None
+    task.jenkins_queue_id = None
+    task.build_number = None
+    task.build_url = None
+    task.console_url = None
     plan.status = "RUNNING"
     db.commit()
 

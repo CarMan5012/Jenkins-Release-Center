@@ -69,9 +69,11 @@ def session_with_running_task():
 
 @patch("app.api.release.log_action")
 @patch("app.api.release.scheduler_manager.remove_release_job")
+@patch.object(JenkinsClient, "get_recent_builds")
 @patch.object(JenkinsClient, "stop_build")
 def test_cancel_running_plan_stops_jenkins_before_marking_cancelled(
     stop_build,
+    get_recent_builds,
     _remove_job,
     _log_action,
 ):
@@ -80,6 +82,7 @@ def test_cancel_running_plan_stops_jenkins_before_marking_cancelled(
     cancel_plan(request(), plan.id, db, user)
 
     stop_build.assert_called_once_with("deploy", 42)
+    get_recent_builds.assert_not_called()
     db.refresh(task)
     assert task.status == "CANCELLED"
 
@@ -91,9 +94,15 @@ def test_cancelled_while_queued_stops_build_after_number_is_resolved():
     db.commit()
 
     client = MagicMock()
+    client.extract_queue_id.return_value = 1
     client.trigger_build.return_value = "http://jenkins.example/queue/item/1/"
+    client.get_build_status.return_value = {
+        "building": False,
+        "result": "SUCCESS",
+        "duration": 1,
+    }
 
-    def resolve_build_number(_queue_url):
+    def resolve_build_number(_queue_url, on_poll=None):
         task.status = "CANCELLED"
         db.commit()
         return 43
@@ -104,24 +113,43 @@ def test_cancelled_while_queued_stops_build_after_number_is_resolved():
         patch("app.services.release_service.SyncSessionLocal", return_value=db),
         patch("app.services.release_service.JenkinsClient", return_value=client),
         patch("app.services.release_service.send_release_notification"),
+        patch("app.services.release_service.write_history"),
+        patch("app.services.release_service.handle_pipeline_success"),
     ):
         execute_task_workflow(plan.id, task.id)
 
     client.stop_build.assert_called_once_with("deploy", 43)
-    assert db.get(ReleaseTask, task.id).status == "CANCELLED"
+    resolved_task = db.get(ReleaseTask, task.id)
+    assert resolved_task.status == "CANCELLED"
+    assert resolved_task.build_number == 43
+    assert resolved_task.jenkins_queue_id == 1
 
 
 def test_retry_plan_immediately_in_place():
     from app.api.release import retry_plan_immediately
     db, user, plan, task = session_with_running_task()
     plan.status = "FAILED"
+    task.status = "FAILED"
+    task.jenkins_queue_id = 1001
+    task.error_message = "failed"
+    task.build_url = "http://jenkins.example/job/deploy/42/"
+    task.console_url = "http://jenkins.example/job/deploy/42/console"
     db.commit()
-
     bg_tasks = MagicMock()
     res = retry_plan_immediately(request(), plan.id, bg_tasks, db, user)
+    db.expire_all()
+    plan = db.get(ReleasePlan, plan.id)
+    task = db.get(ReleaseTask, task.id)
     assert res["success"] is True
     assert res["id"] == plan.id
     assert plan.status == "RUNNING"
+    assert task.status == "WAITING"
+    assert task.error_message is None
+    assert task.finished_at is None
+    assert task.jenkins_queue_id is None
+    assert task.build_number is None
+    assert task.build_url is None
+    assert task.console_url is None
 
 
 def test_retry_single_task_in_place():
@@ -129,11 +157,75 @@ def test_retry_single_task_in_place():
     db, user, plan, task = session_with_running_task()
     task.status = "FAILED"
     plan.status = "FAILED"
+    task.jenkins_queue_id = 1001
+    task.error_message = "failed"
+    task.build_url = "http://jenkins.example/job/deploy/42/"
+    task.console_url = "http://jenkins.example/job/deploy/42/console"
     db.commit()
 
     bg_tasks = MagicMock()
     res = retry_single_task(request(), plan.id, task.id, bg_tasks, db, user)
+    db.expire_all()
+    plan = db.get(ReleasePlan, plan.id)
+    task = db.get(ReleaseTask, task.id)
     assert res["success"] is True
     assert res["task_id"] == task.id
     assert task.status == "WAITING"
     assert plan.status == "RUNNING"
+    assert task.error_message is None
+    assert task.finished_at is None
+    assert task.jenkins_queue_id is None
+    assert task.build_number is None
+    assert task.build_url is None
+
+def test_trigger_plan_clears_previous_jenkins_identity():
+    from app.api.release import trigger_plan_immediately
+
+    db, user, plan, task = session_with_running_task()
+    plan.status = "FAILED"
+    task.status = "FAILED"
+    task.jenkins_queue_id = 1001
+    task.error_message = "failed"
+    task.build_url = "http://jenkins.example/job/deploy/42/"
+    task.console_url = "http://jenkins.example/job/deploy/42/console"
+    db.commit()
+
+    with (
+        patch("app.api.release.scheduler_manager.remove_release_job"),
+        patch("app.api.release.log_action"),
+    ):
+        trigger_plan_immediately(request(), plan.id, MagicMock(), db, user)
+    db.expire_all()
+    task = db.get(ReleaseTask, task.id)
+
+    assert task.status == "WAITING"
+    assert task.jenkins_queue_id is None
+    assert task.build_number is None
+    assert task.build_url is None
+    assert task.console_url is None
+
+
+def test_preflight_failed_plan_clears_previous_jenkins_identity():
+    from app.api.release import preflight_plan
+
+    db, user, plan, task = session_with_running_task()
+    plan.status = "FAILED"
+    task.status = "FAILED"
+    task.jenkins_queue_id = 1001
+    task.error_message = "failed"
+    task.build_url = "http://jenkins.example/job/deploy/42/"
+    task.console_url = "http://jenkins.example/job/deploy/42/console"
+    db.commit()
+
+    with patch("app.api.release._run_preflight_safely", return_value=plan):
+        preflight_plan(plan.id, db, user)
+    db.expire_all()
+    task = db.get(ReleaseTask, task.id)
+
+    assert task.status == "WAITING"
+    assert task.jenkins_queue_id is None
+    assert task.build_number is None
+    assert task.build_url is None
+    assert task.console_url is None
+
+    assert task.console_url is None

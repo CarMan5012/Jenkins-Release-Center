@@ -13,6 +13,9 @@ from app.services.jenkins_client import JenkinsClient
 from app.services.notification import send_release_notification
 from app.services.release_preflight import preflight_block_reason
 
+ACTIVE_TASK_STATUSES = ("QUEUED", "BUILDING", "RUNNING")
+
+
 def execute_release_task(plan_id: int, task_id: int):
     """
     APScheduler entry point callback. Must be a module-level global function.
@@ -54,6 +57,50 @@ def execute_release_task(plan_id: int, task_id: int):
     t = threading.Thread(target=execute_task_workflow, args=(plan_id, task_id))
     t.start()
 
+
+def resolve_task_build_number(
+    db: Session, task: ReleaseTask, client: JenkinsClient
+) -> Optional[int]:
+    if task.build_number is not None:
+        return task.build_number
+    if task.jenkins_queue_id is None:
+        return None
+
+    queue_item = client.get_queue_item(task.jenkins_queue_id)
+    number = ((queue_item or {}).get("executable") or {}).get("number")
+    if number is None:
+        number = next(
+            (
+                build.get("number")
+                for build in client.get_recent_builds(task.job_name, 20)
+                if build.get("queueId") == task.jenkins_queue_id
+            ),
+            None,
+        )
+
+    if number is None:
+        task.error_message = (
+            f"Jenkins queue #{task.jenkins_queue_id} unresolved; "
+            "no matching build number found."
+        )
+        db.commit()
+        return None
+
+    db.execute(
+        update(ReleaseTask)
+        .where(
+            ReleaseTask.id == task.id,
+            ReleaseTask.status.in_(ACTIVE_TASK_STATUSES),
+            ReleaseTask.build_number.is_(None),
+        )
+        .values(build_number=int(number), error_message=None)
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    db.refresh(task)
+    return task.build_number
+
+
 def reconcile_single_task(db: Session, task_id: int) -> bool:
     """
     Queries Jenkins to check the current build status of a task and updates db accordingly.
@@ -70,29 +117,7 @@ def reconcile_single_task(db: Session, task_id: int) -> bool:
         
     client = JenkinsClient(server.url, server.username, server.api_token)
 
-    # 1. 尝试从 Jenkins 上拉取最新 5 条构建，进行构建号纠偏校准
-    try:
-        recent_builds = client.get_recent_builds(task.job_name, limit=5)
-        if recent_builds:
-            # 优先寻找处于 BUILDING 状态的真实构建号
-            active_buildings = [b for b in recent_builds if b.get("status") == "BUILDING"]
-            if active_buildings:
-                latest_building_num = max(b["number"] for b in active_buildings)
-                if task.build_number != latest_building_num:
-                    logger.info(f"手动同步校准：将任务 {task_id} 构建号由 #{task.build_number} 校准为正在运行的真实号 #{latest_building_num}")
-                    task.build_number = latest_building_num
-                    task.status = "BUILDING"
-                    db.commit()
-            else:
-                latest_num = max(b["number"] for b in recent_builds)
-                if not task.build_number or task.build_number < latest_num:
-                    logger.info(f"手动同步校准：将任务 {task_id} 构建号校准为最新构建号 #{latest_num}")
-                    task.build_number = latest_num
-                    db.commit()
-    except Exception as reconcile_ex:
-        logger.warning(f"手动同步尝试获取近 5 次构建失败: {reconcile_ex}")
-
-    if not task.build_number:
+    if resolve_task_build_number(db, task, client) is None:
         return False
         
     try:
@@ -266,6 +291,7 @@ def execute_task_workflow(plan_id: int, task_id: int):
                 time.sleep(retry_delay)
 
         # 4. Resolve Queue item to Build Number (State: QUEUED)
+        task.jenkins_queue_id = client.extract_queue_id(queue_url)
         task.status = "QUEUED"
         task.error_message = None
         db.commit()
@@ -297,44 +323,27 @@ def execute_task_workflow(plan_id: int, task_id: int):
                 return
             raise q_err
         
-        # 4.1 强校验与纠偏：对比 Jenkins 最新构建记录与 resolve 到的 build_number，防错位
-        try:
-            recent = client.get_recent_builds(task.job_name, limit=5)
-            active_building = [b for b in recent if b.get("status") == "BUILDING"]
-            if active_building:
-                latest_real_number = max(b["number"] for b in active_building)
-                if latest_real_number != build_number:
-                    logger.warning(f"检测到构建号错位！解析号 #{build_number} != Jenkins 真实正在运行号 #{latest_real_number}，自动校准为 #{latest_real_number}")
-                    build_number = latest_real_number
-            elif recent:
-                latest_real_number = max(b["number"] for b in recent)
-                if latest_real_number > build_number:
-                    logger.warning(f"检测到构建号偏旧！解析号 #{build_number} < Jenkins 最新号 #{latest_real_number}，自动校准为 #{latest_real_number}")
-                    build_number = latest_real_number
-        except Exception as check_ex:
-            logger.warning(f"校准构建号时忽略异常: {check_ex}")
+        task.build_number = int(build_number)
+        db.commit()
+        db.refresh(task)
+        if task.status == "CANCELLED":
+            logger.info(
+                f"Task {task_id} was cancelled while queued. "
+                f"Stopping Jenkins build #{build_number}."
+            )
+            client.stop_build(task.job_name, build_number)
+            return
 
         # 5. Transition to BUILDING state
+        job_path = "/".join([f"job/{part}" for part in task.job_name.split("/")])
         task.status = "BUILDING"
-        task.build_number = build_number
         task.started_at = datetime.now()
         task.error_message = None
-        db.commit()
-
-        # Broadcast release start notice with 100% accurate build_number
-        send_release_notification(task.id, "start")
-        # Compute exact URL links
-        job_path = "/".join([f"job/{part}" for part in task.job_name.split("/")])
         task.build_url = f"{server.url.rstrip('/')}/{job_path}/{build_number}/"
         task.console_url = f"{server.url.rstrip('/')}/{job_path}/{build_number}/console"
         db.commit()
 
-        # Cancellation may arrive while Jenkins is still assigning a build number.
-        db.refresh(task)
-        if task.status == "CANCELLED":
-            logger.info(f"Task {task_id} was cancelled while queued. Stopping Jenkins build #{build_number}.")
-            client.stop_build(task.job_name, build_number)
-            return
+        send_release_notification(task.id, "start")
 
         # 6. Poll Build Result Status
         logger.info(f"Polling build state for job: {task.job_name} #{build_number}")

@@ -6,10 +6,94 @@ os.environ["APP_ENV"] = "development"
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import sessionmaker
 
-from app.services import jenkins_client
+from app.core.database import Base
+from app.models.jenkins import JenkinsServer
+from app.models.release import ReleasePlan, ReleaseTask
+from app.models.user import User
+
+from app.services import jenkins_client, release_service
+
+def session_with_reconcile_task(**task_values):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    user = User(username="operator", password_hash="x", role="operator")
+    server = JenkinsServer(
+        name="jenkins",
+        url="http://jenkins.example",
+        username="admin",
+        api_token="token",
+    )
+    db.add_all([user, server])
+    db.flush()
+    plan = ReleasePlan(
+        name="release",
+        type="IMMEDIATE",
+        status="RUNNING",
+        preflight_status="PASSED",
+        creator_id=user.id,
+    )
+    db.add(plan)
+    db.flush()
+    task = ReleaseTask(
+        plan_id=plan.id,
+        server_id=server.id,
+        job_name="deploy",
+        branch="main",
+        sequence=0,
+        status=task_values.pop("status", "QUEUED"),
+        **task_values,
+    )
+    db.add(task)
+    db.commit()
+    return db, task
 
 
+def test_reconcile_keeps_bound_build_number_without_jenkins_lookup():
+    db, task = session_with_reconcile_task(build_number=42, jenkins_queue_id=1001)
+    client = MagicMock()
+
+    assert release_service.resolve_task_build_number(db, task, client) == 42
+    client.get_queue_item.assert_not_called()
+    client.get_recent_builds.assert_not_called()
+
+
+def test_reconcile_recovers_build_number_by_exact_queue_id():
+    db, task = session_with_reconcile_task(jenkins_queue_id=1001)
+    client = MagicMock()
+    client.get_queue_item.return_value = {"executable": None}
+    client.get_recent_builds.return_value = [
+        {"number": 43, "queueId": 1002},
+        {"number": 42, "queueId": 1001},
+    ]
+
+    assert release_service.resolve_task_build_number(db, task, client) == 42
+    assert task.build_number == 42
+    client.get_recent_builds.assert_called_once_with("deploy", 20)
+
+
+def test_reconcile_leaves_queue_unresolved_without_exact_queue_id():
+    db, task = session_with_reconcile_task(jenkins_queue_id=1001)
+    client = MagicMock()
+    client.get_queue_item.return_value = {"executable": {}}
+    client.get_recent_builds.return_value = [{"number": 43, "queueId": 1002}]
+
+    assert release_service.resolve_task_build_number(db, task, client) is None
+    assert task.status == "QUEUED"
+    assert task.build_number is None
+    assert "queue" in task.error_message.lower()
+
+
+def test_reconcile_uses_queue_executable_without_recent_build_scan():
+    db, task = session_with_reconcile_task(jenkins_queue_id=1001)
+    client = MagicMock()
+    client.get_queue_item.return_value = {"executable": {"number": 42}}
+
+    assert release_service.resolve_task_build_number(db, task, client) == 42
+    assert task.build_number == 42
+    client.get_recent_builds.assert_not_called()
 def test_jenkins_primitives_extract_queue_id():
     client = jenkins_client.JenkinsClient(
         "https://jenkins.example/", "admin", "token"
