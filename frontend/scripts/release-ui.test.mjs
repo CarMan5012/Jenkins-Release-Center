@@ -44,13 +44,14 @@ for (const viewSource of [releaseViewSource, detailSource, dashboardSource]) {
 }
 assert.match(releaseViewSource, /<PreflightResult/);
 assert.match(detailSource, /<PreflightResult/);
-assert.match(jenkinsSource, /response\.data\.preflight_status/);
+assert.match(jenkinsSource, /response\.data\.message/);
 assert.match(releaseViewSource, /:disabled="[^"]*busyKey === `preflight-\$\{plan\.id\}`/);
 assert.match(releaseViewSource, /function triggerPlan\(plan: ReleasePlan\)[\s\S]*?busyKey\.value === `preflight-\$\{plan\.id\}`/);
 assert.match(detailSource, /const preflightLoading = ref\(false\)/);
 assert.match(detailSource, /:disabled="[^"]*preflightLoading/);
 assert.match(detailSource, /function triggerPlan\(\)[\s\S]*?preflightLoading\.value/);
-assert.match(jenkinsSource, /runModalVisible\.value = false;[\s\S]*?router\.push\(`\/release\/\$\{response\.data\.id\}`\)/);
+assert.match(jenkinsSource, /runModalVisible\.value = false;[\s\S]*?router\.push\(\{[\s\S]*?path: '\/history'/);
+assert.match(jenkinsSource, /query: \{[\s\S]*?tab: 'external'/);
 
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: {
@@ -72,6 +73,8 @@ const {
   isPreflightBlocked,
   formatDuration,
   getQuickExecuteTime,
+  getTaskDurationSeconds,
+  getPlanDurationSeconds,
   filterPlans,
   sortPlans,
 } = module.exports;
@@ -101,6 +104,27 @@ assert.equal(isPreflightBlocked('PASSED'), false);
 assert.equal(isPreflightBlocked('UNKNOWN'), true);
 assert.equal(formatDuration(65), '1m 5s');
 assert.equal(formatDuration(null), '-');
+
+const completedTask = {
+  status: 'SUCCESS',
+  duration: 120,
+  started_at: '2026-07-28T10:00:00',
+  finished_at: '2026-07-28T10:10:00',
+};
+assert.equal(getTaskDurationSeconds(completedTask), 120);
+assert.equal(getTaskDurationSeconds({
+  status: 'SUCCESS',
+  started_at: '2026-07-28T10:00:00',
+  finished_at: '2026-07-28T10:10:00',
+}), 600);
+const fallbackTask = {
+  status: 'SUCCESS',
+  duration: 0,
+  started_at: '2026-07-28T10:00:00',
+  finished_at: '2026-07-28T10:10:00',
+};
+assert.equal(getTaskDurationSeconds(fallbackTask), 600);
+assert.equal(getPlanDurationSeconds({ tasks: [completedTask, fallbackTask] }), 720);
 
 const quickTimeNow = new Date(2026, 6, 27, 21, 45).getTime();
 assert.equal(
