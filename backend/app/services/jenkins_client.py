@@ -1,9 +1,31 @@
+import re
 import time
+from datetime import datetime
+
 import requests
 from typing import Dict, Any, List, Tuple, Optional
 from loguru import logger
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin, quote, urlparse
 from app.core.security import decrypt_secret
+
+
+def normalize_jenkins_status(building: bool, result: Optional[str]) -> str:
+    if building:
+        return "BUILDING"
+    return {
+        "SUCCESS": "SUCCESS",
+        "UNSTABLE": "UNSTABLE",
+        "ABORTED": "CANCELLED",
+        "FAILURE": "FAILED",
+        "NOT_BUILT": "FAILED",
+    }.get(result, "UNKNOWN")
+
+
+def jenkins_datetime(timestamp_ms: Any) -> Optional[datetime]:
+    if not isinstance(timestamp_ms, (int, float)) or timestamp_ms <= 0:
+        return None
+    return datetime.fromtimestamp(timestamp_ms / 1000)
+
 
 class SafeSession(requests.Session):
     def resolve_redirects(self, resp, req, **kwargs):
@@ -51,6 +73,27 @@ class JenkinsClient:
         )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+
+    def extract_queue_id(self, queue_url: str) -> int:
+        queue_parsed = urlparse(queue_url)
+        base_parsed = urlparse(self.base_url)
+        if (queue_parsed.scheme, queue_parsed.netloc) != (
+            base_parsed.scheme,
+            base_parsed.netloc,
+        ):
+            raise ValueError("Queue URL origin does not match Jenkins base URL")
+        match = re.fullmatch(r"/queue/item/(\d+)/?", queue_parsed.path)
+        if not match:
+            raise ValueError("Invalid Jenkins queue URL")
+        return int(match.group(1))
+
+    def get_queue_item(self, queue_id: int) -> Optional[Dict[str, Any]]:
+        url = urljoin(self.base_url, f"queue/item/{queue_id}/api/json")
+        response = self.session.get(url, timeout=10)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
 
     def get_crumb_headers(self) -> Dict[str, str]:
         """
@@ -244,7 +287,8 @@ class JenkinsClient:
                 "result": data.get("result"), # SUCCESS, FAILURE, ABORTED, etc.
                 "timestamp": data.get("timestamp"), # Epoch ms
                 "duration": data.get("duration", 0) // 1000, # seconds
-                "url": data.get("url")
+                "url": data.get("url"),
+                "queue_id": data.get("queueId")
             }
         raise Exception(f"Failed to fetch build status: HTTP {response.status_code}")
 
@@ -448,7 +492,7 @@ class JenkinsClient:
         """
         try:
             job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])
-            tree_param = "allBuilds[number,result,timestamp,duration,building,actions[causes[userName,shortDescription],parameters[name,value]]],builds[number,result,timestamp,duration,building,actions[causes[userName,shortDescription],parameters[name,value]]]"
+            tree_param = "allBuilds[number,queueId,result,timestamp,duration,building,actions[causes[userName,shortDescription],parameters[name,value]]],builds[number,queueId,result,timestamp,duration,building,actions[causes[userName,shortDescription],parameters[name,value]]]"
             url = urljoin(self.base_url, f"{job_path}/api/json?tree={tree_param}")
             response = self.session.get(url, timeout=10)
             if response.status_code == 200:

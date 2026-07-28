@@ -1,9 +1,107 @@
 import os
+from datetime import datetime
+from unittest.mock import MagicMock
 
 os.environ["APP_ENV"] = "development"
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+
+from app.services import jenkins_client
+
+
+def test_jenkins_primitives_extract_queue_id():
+    client = jenkins_client.JenkinsClient(
+        "https://jenkins.example/", "admin", "token"
+    )
+
+    assert client.extract_queue_id(
+        "https://jenkins.example/queue/item/123/"
+    ) == 123
+    with pytest.raises(ValueError):
+        client.extract_queue_id("https://other.example/queue/item/123/")
+    with pytest.raises(ValueError):
+        client.extract_queue_id("https://jenkins.example/queue/item/not-a-number/")
+
+
+@pytest.mark.parametrize(
+    ("building", "result", "expected"),
+    [
+        (True, None, "BUILDING"),
+        (False, "ABORTED", "CANCELLED"),
+        (False, "FAILURE", "FAILED"),
+        (False, "NOT_BUILT", "FAILED"),
+        (False, "SUCCESS", "SUCCESS"),
+        (False, "UNSTABLE", "UNSTABLE"),
+        (False, None, "UNKNOWN"),
+        (False, "SOMETHING_NEW", "UNKNOWN"),
+    ],
+)
+def test_jenkins_primitives_normalize_status(building, result, expected):
+    assert jenkins_client.normalize_jenkins_status(building, result) == expected
+
+
+def test_jenkins_primitives_datetime():
+    assert jenkins_client.jenkins_datetime(1_700_000_000_000) == datetime.fromtimestamp(
+        1_700_000_000
+    )
+    assert jenkins_client.jenkins_datetime(None) is None
+    assert jenkins_client.jenkins_datetime(0) is None
+    assert jenkins_client.jenkins_datetime("1700000000000") is None
+
+
+def test_jenkins_primitives_get_queue_item():
+    found = MagicMock(status_code=200)
+    found.json.return_value = {"id": 123}
+    missing = MagicMock(status_code=404)
+    client = jenkins_client.JenkinsClient(
+        "https://jenkins.example/", "admin", "token"
+    )
+    client.session.get = MagicMock(side_effect=[found, missing])
+
+    assert client.get_queue_item(123) == {"id": 123}
+    assert client.get_queue_item(123) is None
+    assert client.session.get.call_args_list == [
+        (("https://jenkins.example/queue/item/123/api/json",), {"timeout": 10}),
+        (("https://jenkins.example/queue/item/123/api/json",), {"timeout": 10}),
+    ]
+    found.raise_for_status.assert_called_once_with()
+    missing.raise_for_status.assert_not_called()
+
+
+def test_jenkins_primitives_recent_builds_keep_queue_id():
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "allBuilds": [{"number": 7, "queueId": 123}]
+    }
+    client = jenkins_client.JenkinsClient(
+        "https://jenkins.example/", "admin", "token"
+    )
+    client.session.get = MagicMock(return_value=response)
+
+    assert client.get_recent_builds("deploy") == [{"number": 7, "queueId": 123}]
+    requested_url = client.session.get.call_args.args[0]
+    assert requested_url.count("queueId") == 2
+
+
+def test_jenkins_primitives_build_status_exposes_queue_id():
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "building": True,
+        "result": None,
+        "timestamp": 1_700_000_000_000,
+        "duration": 5_000,
+        "url": "https://jenkins.example/job/deploy/7/",
+        "queueId": 123,
+    }
+    client = jenkins_client.JenkinsClient(
+        "https://jenkins.example/", "admin", "token"
+    )
+    client.session.get = MagicMock(return_value=response)
+
+    status = client.get_build_status("deploy", 7)
+
+    assert status["queue_id"] == 123
 
 
 def test_legacy_schema_upgrade_is_idempotent_and_deduplicates_builds():
