@@ -24,6 +24,22 @@ def test_jenkins_primitives_extract_queue_id():
         client.extract_queue_id("https://jenkins.example/queue/item/not-a-number/")
 
 
+def test_jenkins_primitives_extract_queue_id_respects_context_path():
+    client = jenkins_client.JenkinsClient(
+        "https://jenkins.example/jenkins/", "admin", "token"
+    )
+
+    assert client.extract_queue_id(
+        "https://jenkins.example/jenkins/queue/item/123/"
+    ) == 123
+    with pytest.raises(ValueError):
+        client.extract_queue_id("https://jenkins.example/queue/item/123/")
+    with pytest.raises(ValueError):
+        client.extract_queue_id(
+            "https://jenkins.example/jenkins-other/queue/item/123/"
+        )
+
+
 @pytest.mark.parametrize(
     ("building", "result", "expected"),
     [

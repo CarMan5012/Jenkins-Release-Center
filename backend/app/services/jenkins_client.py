@@ -82,7 +82,8 @@ class JenkinsClient:
             base_parsed.netloc,
         ):
             raise ValueError("Queue URL origin does not match Jenkins base URL")
-        match = re.fullmatch(r"/queue/item/(\d+)/?", queue_parsed.path)
+        base_path = base_parsed.path.rstrip("/")
+        match = re.fullmatch(rf"{re.escape(base_path)}/queue/item/(\d+)/?", queue_parsed.path)
         if not match:
             raise ValueError("Invalid Jenkins queue URL")
         return int(match.group(1))
