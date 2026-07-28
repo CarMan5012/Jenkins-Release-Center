@@ -69,9 +69,19 @@ def test_schema_upgrade_rejects_same_name_non_unique_index():
             "CREATE INDEX uix_release_history_build_identity "
             "ON release_history (server_id, job_name, build_number)"
         ))
+        connection.execute(text(
+            "INSERT INTO release_history "
+            "(id, task_id, server_id, server_name, job_name, build_number, status) VALUES "
+            "(1, 10, 1, 's1', 'deploy', 7, 'SUCCESS'), "
+            "(2, NULL, 1, 's1', 'deploy', 7, 'SUCCESS')"
+        ))
 
     with pytest.raises(
         RuntimeError,
         match="Index uix_release_history_build_identity conflicts",
     ):
         ensure_jenkins_consistency_schema(engine)
+
+    with engine.connect() as connection:
+        ids = connection.execute(text("SELECT id FROM release_history ORDER BY id")).scalars().all()
+    assert ids == [1, 2]
