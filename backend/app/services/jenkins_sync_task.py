@@ -170,8 +170,22 @@ def sync_external_builds(server_id: Optional[int] = None, job_name: Optional[str
                     logs = None
                     if not is_building:
                         try:
-                            log_text, _, _ = client.get_progressive_log(job.name, build_number, 0)
-                            logs = (log_text or "")[:200000]
+                            log_text, _, has_more = client.get_progressive_log(
+                                job.name, build_number, 0
+                            )
+                            if has_more or (log_text or "").startswith(
+                                (
+                                    "HTTP Error ",
+                                    "Error retrieving build logs:",
+                                    "Waiting for build console output",
+                                )
+                            ):
+                                logger.warning(
+                                    "Jenkins log is incomplete for server {} job '{}' #{}",
+                                    server.id, job.name, build_number,
+                                )
+                            else:
+                                logs = (log_text or "")[:200000]
                         except Exception as exc:
                             logger.warning(
                                 "Could not archive Jenkins log for server {} job '{}' #{}: {}",

@@ -389,13 +389,21 @@ def get_git_branches(
     current_user: User = Depends(get_current_user)
 ):
     server = db.get(JenkinsServer, server_id)
-    job = db.get(JenkinsJob, job_id)
-    if not server or not job:
+    if not server:
         raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例或对应的 Job")
     if not server.is_active:
         raise HTTPException(status_code=400, detail="该 Jenkins 实例已被禁用，无法获取分支信息")
         
     branches: List[str] = []
+    job = (
+        db.query(JenkinsJob)
+        .filter(JenkinsJob.id == job_id, JenkinsJob.server_id == server_id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(
+            status_code=404, detail="Jenkins server or job was not found"
+        )
     try:
         client = JenkinsClient(server.url, server.username, server.api_token)
         branches = client.get_branches_and_tags(job.name)

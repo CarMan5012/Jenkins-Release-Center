@@ -719,3 +719,38 @@ def test_external_sync_keeps_internal_history_associations():
         "external_sync": True,
         "queueId": 1007,
     }
+
+
+@pytest.mark.parametrize(
+    ("log_text", "has_more"),
+    [
+        ("HTTP Error 500 while reading logs.", False),
+        ("Error retrieving build logs: timeout", False),
+        ("Waiting for build console output", False),
+        ("partial log", True),
+    ],
+)
+def test_external_sync_preserves_archived_log_when_fetch_is_incomplete(
+    log_text, has_more
+):
+    db = external_history_session()
+    db.add(
+        ReleaseHistory(
+            server_id=1,
+            server_name="jenkins-1",
+            job_name="deploy",
+            build_number=7,
+            status="SUCCESS",
+            logs="good",
+            is_external=True,
+        )
+    )
+    db.commit()
+    client = MagicMock()
+    client.get_recent_builds.return_value = [external_build(7)]
+    client.get_build_numbers.return_value = {7}
+    client.get_progressive_log.return_value = (log_text, 0, has_more)
+
+    run_external_sync(db, {"http://jenkins-1.example": client})
+
+    assert db.query(ReleaseHistory).one().logs == "good"

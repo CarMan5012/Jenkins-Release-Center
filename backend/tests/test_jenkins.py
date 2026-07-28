@@ -3,10 +3,15 @@ import zipfile
 import pytest
 from fastapi import HTTPException
 from unittest.mock import patch, MagicMock
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from app.api.deps import get_current_active_admin
+from app.core.database import Base
 from app.api.jenkins import get_git_branches, read_backup_details, router
+from app.models.jenkins import JenkinsJob, JenkinsServer
 from app.services.jenkins_client import JenkinsClient
+
 
 @patch('requests.Session.get')
 def test_jenkins_connection_success(mock_get):
@@ -219,3 +224,37 @@ def test_get_git_branches_rejects_inactive_server(mock_client):
     assert exc_info.value.detail == "该 Jenkins 实例已被禁用，无法获取分支信息"
     mock_client.assert_not_called()
     db.query.assert_not_called()
+
+
+@patch("app.api.jenkins.JenkinsClient")
+def test_get_git_branches_rejects_job_owned_by_another_server(mock_client):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    db.add_all(
+        [
+            JenkinsServer(
+                id=1,
+                name="jenkins-1",
+                url="http://jenkins-1.example",
+                username="admin",
+                api_token="token",
+            ),
+            JenkinsServer(
+                id=2,
+                name="jenkins-2",
+                url="http://jenkins-2.example",
+                username="admin",
+                api_token="token",
+            ),
+            JenkinsJob(id=2, server_id=2, name="deploy"),
+        ]
+    )
+    db.commit()
+
+    with pytest.raises(HTTPException) as error:
+        get_git_branches(1, 2, db)
+
+    assert error.value.status_code == 404
+    mock_client.assert_not_called()
+    db.close()
