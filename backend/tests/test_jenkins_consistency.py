@@ -342,3 +342,222 @@ def test_schema_upgrade_deduplicates_before_server_backfill():
             "SELECT id, task_id, server_id FROM release_history ORDER BY id"
         )).all()
     assert [tuple(row) for row in rows] == [(1, 10, 1)]
+
+from datetime import timedelta
+
+
+@pytest.mark.parametrize(
+    ("jenkins_result", "task_status", "notification", "pipeline_handler"),
+    [
+        ("SUCCESS", "SUCCESS", "success", "handle_pipeline_success"),
+        ("ABORTED", "CANCELLED", "failed", "handle_pipeline_failure"),
+        ("FAILURE", "FAILED", "failed", "handle_pipeline_failure"),
+    ],
+)
+def test_finalize_task_claims_terminal_state_once(
+    jenkins_result, task_status, notification, pipeline_handler
+):
+    db, task = session_with_reconcile_task(status="BUILDING", build_number=42)
+    status_info = {
+        "building": False,
+        "result": jenkins_result,
+        "timestamp": 1_700_000_000_000,
+        "duration": 7,
+    }
+    client = MagicMock()
+
+    with (
+        patch.object(release_service, "send_release_notification") as notify,
+        patch.object(release_service, "write_history") as history,
+        patch.object(release_service, "handle_pipeline_success") as success,
+        patch.object(release_service, "handle_pipeline_failure") as failure,
+    ):
+        assert release_service.finalize_task_from_jenkins(db, task, status_info, client) is True
+        assert release_service.finalize_task_from_jenkins(db, task, status_info, client) is False
+
+    db.refresh(task)
+    started_at = datetime.fromtimestamp(1_700_000_000)
+    assert task.status == task_status
+    assert task.duration == 7
+    assert task.started_at == started_at
+    assert task.finished_at == started_at + timedelta(seconds=7)
+    assert task.error_message == (
+        None if task_status == "SUCCESS" else f"Jenkins result: {task_status}"
+    )
+    notify.assert_called_once_with(task.id, notification)
+    history.assert_called_once_with(
+        db, task, task_status, 7, jenkins_result, client
+    )
+    {"handle_pipeline_success": success, "handle_pipeline_failure": failure}[
+        pipeline_handler
+    ].assert_called_once_with(db, task.plan_id, task.id)
+    assert success.call_count + failure.call_count == 1
+
+from app.api import release as release_api
+from app.models.release import ReleaseHistory
+
+
+def test_plan_get_endpoints_are_read_only():
+    db, task = session_with_reconcile_task(status="BUILDING", build_number=42)
+    original_status = task.status
+
+    with (
+        patch.object(release_service, "reconcile_single_task") as reconcile,
+        patch.object(release_service, "check_and_finalize_plan") as finalize_plan,
+    ):
+        plans = release_api.list_plans(db=db, current_user=task.plan.creator)
+        plan = release_api.get_plan(task.plan_id, db=db, current_user=task.plan.creator)
+
+    assert [item.id for item in plans] == [task.plan_id]
+    assert plan.id == task.plan_id
+    assert task.status == original_status
+    reconcile.assert_not_called()
+    finalize_plan.assert_not_called()
+
+
+def test_get_missing_plan_is_read_only_404():
+    db, task = session_with_reconcile_task()
+
+    with (
+        patch.object(release_service, "reconcile_single_task") as reconcile,
+        patch.object(release_service, "check_and_finalize_plan") as finalize_plan,
+        pytest.raises(release_api.HTTPException) as error,
+    ):
+        release_api.get_plan(999, db=db, current_user=task.plan.creator)
+
+    assert error.value.status_code == 404
+    reconcile.assert_not_called()
+    finalize_plan.assert_not_called()
+
+
+def test_write_history_promotes_matching_external_build():
+    db, task = session_with_reconcile_task(
+        status="SUCCESS",
+        build_number=42,
+        started_at=datetime(2024, 1, 1, 12, 0),
+        finished_at=datetime(2024, 1, 1, 12, 0, 7),
+    )
+    db.add(
+        ReleaseHistory(
+            server_id=task.server_id,
+            server_name="jenkins",
+            job_name=task.job_name,
+            build_number=task.build_number,
+            status="SUCCESS",
+            is_external=True,
+        )
+    )
+    db.commit()
+
+    release_service.write_history(db, task, "SUCCESS", 7, "SUCCESS", None)
+
+    histories = db.query(ReleaseHistory).all()
+    assert len(histories) == 1
+    history = histories[0]
+    assert (history.task_id, history.plan_id, history.server_id) == (
+        task.id,
+        task.plan_id,
+        task.server_id,
+    )
+    assert history.is_external is False
+    assert (history.job_name, history.branch, history.build_number) == (
+        task.job_name,
+        task.branch,
+        task.build_number,
+    )
+
+
+def test_write_history_prefers_internal_task_row_and_removes_external_identity():
+    db, task = session_with_reconcile_task(status="FAILED", build_number=42)
+    internal = ReleaseHistory(
+        task_id=task.id,
+        plan_id=task.plan_id,
+        server_id=None,
+        job_name=task.job_name,
+        build_number=task.build_number,
+        status="RUNNING",
+        is_external=False,
+    )
+    external = ReleaseHistory(
+        server_id=task.server_id,
+        server_name="jenkins",
+        job_name=task.job_name,
+        build_number=task.build_number,
+        status="FAILURE",
+        is_external=True,
+    )
+    db.add_all([internal, external])
+    db.commit()
+    internal_id = internal.id
+
+    release_service.write_history(db, task, "FAILED", 9, "FAILURE", None)
+
+    histories = db.query(ReleaseHistory).all()
+    assert [history.id for history in histories] == [internal_id]
+    assert histories[0].task_id == task.id
+    assert histories[0].server_id == task.server_id
+    assert histories[0].is_external is False
+
+
+def test_write_history_does_not_merge_missing_build_identities():
+    db, first = session_with_reconcile_task(status="SUCCESS")
+    first.started_at = datetime(2024, 1, 1, 12, 0)
+    first.finished_at = datetime(2024, 1, 1, 12, 0, 1)
+    db.commit()
+    release_service.write_history(db, first, "SUCCESS", 1, "SUCCESS", None)
+
+    second = ReleaseTask(
+        plan_id=first.plan_id,
+        server_id=first.server_id,
+        job_name=first.job_name,
+        branch="other",
+        sequence=1,
+        status="SUCCESS",
+        started_at=datetime(2024, 1, 1, 12, 1),
+        finished_at=datetime(2024, 1, 1, 12, 1, 1),
+    )
+    db.add(second)
+    db.commit()
+
+    release_service.write_history(db, second, "SUCCESS", 1, "SUCCESS", None)
+
+    histories = db.query(ReleaseHistory).order_by(ReleaseHistory.id).all()
+    assert [history.task_id for history in histories] == [first.id, second.id]
+
+
+def test_workflow_keeps_polling_unknown_jenkins_result():
+    db, task = session_with_reconcile_task(status="WAITING")
+    client = MagicMock()
+    client.trigger_build.return_value = "http://jenkins.example/queue/item/1/"
+    client.extract_queue_id.return_value = 1
+    client.get_build_number_from_queue.return_value = 42
+    client.get_build_status.side_effect = [
+        {
+            "building": False,
+            "result": None,
+            "timestamp": 1_700_000_000_000,
+            "duration": 0,
+        },
+        {
+            "building": False,
+            "result": "SUCCESS",
+            "timestamp": 1_700_000_000_000,
+            "duration": 7,
+        },
+    ]
+
+    with (
+        patch.object(release_service, "SyncSessionLocal", return_value=db),
+        patch.object(release_service, "JenkinsClient", return_value=client),
+        patch.object(release_service.time, "sleep"),
+        patch.object(release_service, "send_release_notification"),
+        patch.object(release_service, "write_history"),
+        patch.object(release_service, "handle_pipeline_success") as success,
+    ):
+        release_service.execute_task_workflow(task.plan_id, task.id)
+
+    db.expire_all()
+    finished_task = db.get(ReleaseTask, task.id)
+    assert client.get_build_status.call_count == 2
+    assert finished_task.status == "SUCCESS"
+    success.assert_called_once_with(db, task.plan_id, task.id)

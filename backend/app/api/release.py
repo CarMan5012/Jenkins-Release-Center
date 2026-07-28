@@ -433,25 +433,6 @@ def list_plans(
     res = db.execute(stmt)
     plans = res.scalars().all()
     
-    from app.services.release_service import reconcile_single_task, check_and_finalize_plan
-    any_updated = False
-    for plan in plans:
-        has_active_tasks = any(t.status in ["QUEUED", "BUILDING", "RUNNING"] for t in plan.tasks)
-        if plan.status == "RUNNING" or has_active_tasks:
-            for t in plan.tasks:
-                if t.status in ["QUEUED", "BUILDING", "RUNNING"]:
-                    try:
-                        if reconcile_single_task(db, t.id):
-                            any_updated = True
-                    except Exception:
-                        pass
-            check_and_finalize_plan(db, plan.id)
-            any_updated = True
-            
-    if any_updated:
-        db.expire_all()
-        plans = db.execute(stmt).scalars().all()
-        
     return plans
 
 @router.get("/plans/{plan_id}", response_model=ReleasePlanResponse)
@@ -468,18 +449,6 @@ def get_plan(
     if not plan:
         raise HTTPException(status_code=404, detail="未找到该发布计划")
 
-    from app.services.release_service import reconcile_single_task, check_and_finalize_plan
-    has_active_tasks = any(t.status in ["QUEUED", "BUILDING", "RUNNING"] for t in plan.tasks)
-    if plan.status == "RUNNING" or has_active_tasks:
-        for t in plan.tasks:
-            if t.status in ["QUEUED", "BUILDING", "RUNNING"]:
-                try:
-                    reconcile_single_task(db, t.id)
-                except Exception:
-                    pass
-        check_and_finalize_plan(db, plan.id)
-        db.expire_all()
-        plan = db.execute(stmt).scalars().first()
 
     return plan
 

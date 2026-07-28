@@ -1,19 +1,86 @@
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-from sqlalchemy import exists, update
+from sqlalchemy import and_, exists, or_, update
 from sqlalchemy.orm import Session
 from loguru import logger
 
 from app.core.database import SyncSessionLocal
 from app.models.release import ReleasePlan, ReleaseTask, ReleaseHistory
 from app.models.jenkins import JenkinsServer, JenkinsJob
-from app.services.jenkins_client import JenkinsClient
+from app.services.jenkins_client import JenkinsClient, jenkins_datetime, normalize_jenkins_status
 from app.services.notification import send_release_notification
 from app.services.release_preflight import preflight_block_reason
 
 ACTIVE_TASK_STATUSES = ("QUEUED", "BUILDING", "RUNNING")
+
+
+def claim_task_final_state(
+    db: Session,
+    task_id: int,
+    status: str,
+    duration: int,
+    started_at: datetime,
+    finished_at: datetime,
+) -> bool:
+    result = db.execute(
+        update(ReleaseTask)
+        .where(
+            ReleaseTask.id == task_id,
+            ReleaseTask.status.in_(ACTIVE_TASK_STATUSES),
+        )
+        .values(
+            status=status,
+            duration=duration,
+            started_at=started_at,
+            finished_at=finished_at,
+            error_message=None if status == "SUCCESS" else f"Jenkins result: {status}",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    return result.rowcount == 1
+
+
+def finalize_task_from_jenkins(
+    db: Session,
+    task: ReleaseTask,
+    status_info: Dict[str, Any],
+    client: JenkinsClient,
+) -> bool:
+    status = normalize_jenkins_status(
+        status_info.get("building", False), status_info.get("result")
+    )
+    if status in ("BUILDING", "UNKNOWN"):
+        return False
+
+    raw_duration = status_info.get("duration", 0)
+    try:
+        duration = int(raw_duration) if raw_duration is not None else 0
+    except (TypeError, ValueError):
+        duration = 0
+    started_at = (
+        jenkins_datetime(status_info.get("timestamp"))
+        or task.started_at
+        or datetime.now()
+    )
+    finished_at = started_at + timedelta(seconds=duration)
+    if not claim_task_final_state(
+        db, task.id, status, duration, started_at, finished_at
+    ):
+        db.refresh(task)
+        return False
+
+    db.refresh(task)
+    raw_status = status_info.get("result")
+    send_release_notification(task.id, "success" if status == "SUCCESS" else "failed")
+    write_history(db, task, status, duration, raw_status, client)
+    if status == "SUCCESS":
+        handle_pipeline_success(db, task.plan_id, task.id)
+    else:
+        handle_pipeline_failure(db, task.plan_id, task.id)
+    return True
 
 
 def execute_release_task(plan_id: int, task_id: int):
@@ -140,49 +207,10 @@ def reconcile_single_task(db: Session, task_id: int) -> bool:
             db.commit()
             return True
             
-        build_result = status_info.get("result")
-        raw_duration = status_info.get("duration", 0)
-        try:
-            duration = int(raw_duration) if raw_duration is not None else 0
-        except (ValueError, TypeError):
-            duration = 0
-        
-        if build_result:
-            task.finished_at = datetime.now()
-            task.duration = duration
-            
-            if build_result == "SUCCESS":
-                task.status = "SUCCESS"
-                task.error_message = None
-                db.commit()
-                send_release_notification(task.id, "success")
-                write_history(db, task, "SUCCESS", duration, "SUCCESS", client)
-                handle_pipeline_success(db, task.plan_id, task.id)
-            elif build_result == "UNSTABLE":
-                task.status = "UNSTABLE"
-                task.error_message = "Jenkins Build completed with status: UNSTABLE (Reconciled)"
-                db.commit()
-                send_release_notification(task.id, "failed")
-                write_history(db, task, "UNSTABLE", duration, "UNSTABLE", client)
-                handle_pipeline_failure(db, task.plan_id, task.id)
-            elif build_result == "ABORTED":
-                task.status = "CANCELLED"
-                task.error_message = "Jenkins Build was aborted (Reconciled)"
-                db.commit()
-                send_release_notification(task.id, "failed")
-                write_history(db, task, "CANCELLED", duration, "ABORTED", client)
-                handle_pipeline_failure(db, task.plan_id, task.id)
-            else:
-                task.status = "FAILED"
-                task.error_message = f"Jenkins Build completed with status: {build_result} (Reconciled)"
-                db.commit()
-                send_release_notification(task.id, "failed")
-                write_history(db, task, "FAILED", duration, build_result, client)
-                handle_pipeline_failure(db, task.plan_id, task.id)
-            
-            check_and_finalize_plan(db, task.plan_id)
+        finalized = finalize_task_from_jenkins(db, task, status_info, client)
+        if finalized:
             logger.info(f"Task {task_id} successfully reconciled to status: {task.status}")
-            return True
+        return finalized
     except Exception as e:
         logger.error(f"Failed to reconcile task {task_id} status from Jenkins: {str(e)}")
         
@@ -395,8 +423,8 @@ def execute_task_workflow(plan_id: int, task_id: int):
         timeout_seconds = 3600  # Default 1h timeout
         poll_start = time.time()
         
-        build_result = None
-        duration = 0
+        status_info = None
+        jenkins_status = "UNKNOWN"
         consecutive_not_found = 0
         
         while time.time() - poll_start < timeout_seconds:
@@ -409,9 +437,10 @@ def execute_task_workflow(plan_id: int, task_id: int):
             try:
                 status_info = client.get_build_status(task.job_name, build_number)
                 consecutive_not_found = 0
-                if not status_info["building"]:
-                    build_result = status_info["result"]
-                    duration = status_info["duration"]
+                jenkins_status = normalize_jenkins_status(
+                    status_info.get("building", False), status_info.get("result")
+                )
+                if jenkins_status not in ("BUILDING", "UNKNOWN"):
                     break
             except Exception as e:
                 err_str = str(e).lower()
@@ -433,41 +462,11 @@ def execute_task_workflow(plan_id: int, task_id: int):
             logger.info(f"Task {task_id} was finalized externally during poll. Exiting workflow.")
             return
 
-        if not build_result:
+        if jenkins_status in ("BUILDING", "UNKNOWN"):
             raise TimeoutError(f"Jenkins build did not finish within the maximum timeout of {timeout_seconds} seconds.")
 
-        task.finished_at = datetime.now()
-        task.duration = duration
-
-        if build_result == "SUCCESS":
-            task.status = "SUCCESS"
-            task.error_message = None
-            db.commit()
-            send_release_notification(task.id, "success")
-            write_history(db, task, "SUCCESS", duration, "SUCCESS", client)
-            # Advance to next dependency in pipeline
-            handle_pipeline_success(db, plan_id, task_id)
-        elif build_result == "UNSTABLE":
-            task.status = "UNSTABLE"
-            task.error_message = "Jenkins 构建完成，状态为 UNSTABLE (不稳定)"
-            db.commit()
-            send_release_notification(task.id, "failed")
-            write_history(db, task, "UNSTABLE", duration, "UNSTABLE", client)
-            handle_pipeline_failure(db, plan_id, task_id)
-        elif build_result == "ABORTED":
-            task.status = "CANCELLED"
-            task.error_message = "Jenkins 构建被手动中止 (ABORTED)"
-            db.commit()
-            send_release_notification(task.id, "failed")
-            write_history(db, task, "CANCELLED", duration, "ABORTED", client)
-            handle_pipeline_failure(db, plan_id, task_id)
-        else:
-            task.status = "FAILED"
-            task.error_message = f"Jenkins Build completed with status: {build_result}"
-            db.commit()
-            send_release_notification(task.id, "failed")
-            write_history(db, task, "FAILED", duration, build_result, client)
-            handle_pipeline_failure(db, plan_id, task_id)
+        if not finalize_task_from_jenkins(db, task, status_info, client):
+            return
 
     except Exception as e:
         logger.error(f"Task workflow execution failure: {str(e)}")
@@ -510,60 +509,68 @@ def execute_task_workflow(plan_id: int, task_id: int):
         db.close()
 
 def write_history(db: Session, task: ReleaseTask, status: str, duration: int, raw_status: str, client: Optional[JenkinsClient]):
-    """
-    Log completed build execution trace details and progressive log texts to historical archives.
-    Updates existing history log if it already exists for the task, to prevent duplicated records and stat discrepancy.
-    Clean up any redundant historical rows for the same task.
-    """
     logs = ""
     if client and task.build_number:
         try:
-            # We capture the final logs snapshot
-            logs, _, _ = client.get_progressive_log(task.job_name, task.build_number, start=0)
+            logs, _, _ = client.get_progressive_log(
+                task.job_name, task.build_number, start=0
+            )
         except Exception as e:
             logs = f"Failed to sync build logs: {str(e)}"
-            
-    # Look for all existing history records for this task (excluding external manual syncs)
-    histories = db.query(ReleaseHistory).filter(
-        ReleaseHistory.task_id == task.id,
-        ReleaseHistory.is_external == False
-    ).order_by(ReleaseHistory.id.desc()).all()
-    
+
+    history_filters = [ReleaseHistory.task_id == task.id]
+    if (
+        task.server_id is not None
+        and task.job_name
+        and task.build_number is not None
+    ):
+        history_filters.append(
+            and_(
+                ReleaseHistory.server_id == task.server_id,
+                ReleaseHistory.job_name == task.job_name,
+                ReleaseHistory.build_number == task.build_number,
+            )
+        )
+
+    histories = (
+        db.query(ReleaseHistory)
+        .filter(or_(*history_filters))
+        .order_by(
+            ReleaseHistory.task_id.isnot(None).desc(),
+            ReleaseHistory.id.desc(),
+        )
+        .all()
+    )
+
     if histories:
-        # Update the latest one (first item in desc order)
         main_history = histories[0]
-        main_history.status = status
-        main_history.finished_at = task.finished_at
-        main_history.duration = duration
-        if logs:
-            main_history.logs = logs[:200000]
-        main_history.raw_response = {"final_jenkins_result": raw_status, "reconciled": True}
-        
-        # Delete any other redundant history records for this task
         for extra in histories[1:]:
             db.delete(extra)
-            
-        db.commit()
-        logger.info(f"Updated main ReleaseHistory for task {task.id} to status {status} and removed {len(histories) - 1} duplicates.")
+        if len(histories) > 1:
+            db.flush()
     else:
-        history = ReleaseHistory(
-            task_id=task.id,
-            plan_id=task.plan_id,
-            server_name=task.server.name if task.server else "Unknown",
-            job_name=task.job_name,
-            branch=task.branch,
-            build_number=task.build_number,
-            status=status,
-            trigger_by="scheduler_service",
-            started_at=task.started_at,
-            finished_at=task.finished_at,
-            duration=duration,
-            logs=logs[:200000],
-            raw_response={"final_jenkins_result": raw_status}
-        )
-        db.add(history)
-        db.commit()
-        logger.info(f"Created new ReleaseHistory for task {task.id} with status: {status}")
+        main_history = ReleaseHistory()
+        db.add(main_history)
+
+    main_history.task_id = task.id
+    main_history.plan_id = task.plan_id
+    main_history.server_id = task.server_id
+    main_history.server_name = task.server.name if task.server else "Unknown"
+    main_history.job_name = task.job_name
+    main_history.branch = task.branch
+    main_history.build_number = task.build_number
+    main_history.status = status
+    main_history.is_external = False
+    main_history.trigger_by = "scheduler_service"
+    main_history.started_at = task.started_at
+    main_history.finished_at = task.finished_at
+    main_history.duration = duration
+    main_history.logs = logs[:200000]
+    main_history.raw_response = {"final_jenkins_result": raw_status}
+    db.commit()
+    logger.info(
+        f"Recorded ReleaseHistory for task {task.id} with status: {status}"
+    )
 
 def handle_pipeline_success(db: Session, plan_id: int, task_id: int):
     """
