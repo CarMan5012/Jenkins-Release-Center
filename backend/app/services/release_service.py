@@ -449,9 +449,19 @@ def execute_task_workflow(plan_id: int, task_id: int):
                     consecutive_not_found += 1
                     if consecutive_not_found >= 3:
                         logger.error(f"Jenkins build #{build_number} for {task.job_name} not found after 3 retries. Marking task as FAILED.")
-                        task.status = "FAILED"
+                        finished_at = datetime.now()
+                        if not claim_task_final_state(
+                            db,
+                            task.id,
+                            "FAILED",
+                            0,
+                            task.started_at or finished_at,
+                            finished_at,
+                        ):
+                            db.refresh(task)
+                            return
+                        db.refresh(task)
                         task.error_message = f"Jenkins 远端无构建记录 #{build_number}（可能已被手动删除或队列取消）"
-                        task.finished_at = datetime.now()
                         db.commit()
                         send_release_notification(task.id, "failed")
                         return
@@ -495,9 +505,19 @@ def execute_task_workflow(plan_id: int, task_id: int):
                 task.error_message = f"网络连接闪断: {str(e)} (后端保持构建检测)"
                 db.commit()
             elif not corrected:
-                task.status = "FAILED"
+                finished_at = datetime.now()
+                if not claim_task_final_state(
+                    db,
+                    task.id,
+                    "FAILED",
+                    0,
+                    task.started_at or finished_at,
+                    finished_at,
+                ):
+                    db.refresh(task)
+                    return
+                db.refresh(task)
                 task.error_message = str(e)
-                task.finished_at = datetime.now()
                 db.commit()
                 try:
                     send_release_notification(task.id, "failed")

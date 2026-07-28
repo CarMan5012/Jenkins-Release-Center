@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 os.environ["APP_ENV"] = "development"
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, text, update
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
@@ -603,6 +603,77 @@ def test_workflow_keeps_polling_unknown_jenkins_result():
     assert client.get_build_status.call_count == 2
     assert finished_task.status == "SUCCESS"
     success.assert_called_once_with(db, task.plan_id, task.id)
+
+
+@pytest.mark.parametrize(
+    ("poll_errors", "clock"),
+    [
+        ([Exception("HTTP 404 not found")] * 3, [0, 0, 1, 2]),
+        ([RuntimeError("network down")] * 2, [0, 0, 3601]),
+    ],
+)
+def test_polling_failure_does_not_override_corrected_terminal_state(
+    poll_errors, clock
+):
+    db, task = session_with_reconcile_task(status="WAITING")
+    client = MagicMock()
+    client.trigger_build.return_value = "http://jenkins.example/queue/item/1/"
+    client.extract_queue_id.return_value = 1
+    client.get_build_number_from_queue.return_value = 42
+    client.get_build_status.side_effect = poll_errors
+
+    real_execute = db.execute
+    failed_claim_seen = False
+    corrected_at = datetime(2024, 1, 1, 12, 0)
+
+    def correct_before_failed_claim(statement, *args, **kwargs):
+        nonlocal failed_claim_seen
+        values = getattr(statement, "_values", {})
+        target_status = next(
+            (
+                getattr(value, "value", None)
+                for column, value in values.items()
+                if getattr(column, "name", None) == "status"
+            ),
+            None,
+        )
+        if target_status == "FAILED" and not failed_claim_seen:
+            failed_claim_seen = True
+            real_execute(
+                update(ReleaseTask)
+                .where(ReleaseTask.id == task.id)
+                .values(
+                    status="SUCCESS",
+                    error_message="corrected",
+                    finished_at=corrected_at,
+                )
+            )
+            db.commit()
+        return real_execute(statement, *args, **kwargs)
+
+    db.execute = MagicMock(side_effect=correct_before_failed_claim)
+    with (
+        patch.object(release_service, "SyncSessionLocal", return_value=db),
+        patch.object(release_service, "JenkinsClient", return_value=client),
+        patch.object(release_service.time, "time", side_effect=clock),
+        patch.object(release_service.time, "sleep"),
+        patch.object(release_service, "send_release_notification") as notify,
+        patch.object(release_service, "write_history") as history,
+        patch.object(release_service, "handle_pipeline_success") as success,
+        patch.object(release_service, "handle_pipeline_failure") as failure,
+    ):
+        release_service.execute_task_workflow(task.plan_id, task.id)
+
+    db.expire_all()
+    resolved_task = db.get(ReleaseTask, task.id)
+    assert failed_claim_seen is True
+    assert resolved_task.status == "SUCCESS"
+    assert resolved_task.error_message == "corrected"
+    assert resolved_task.finished_at == corrected_at
+    notify.assert_called_once_with(task.id, "start")
+    history.assert_not_called()
+    success.assert_not_called()
+    failure.assert_not_called()
 
 
 def test_external_sync_preserves_history_outside_recent_window():
