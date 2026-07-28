@@ -406,6 +406,7 @@ def get_git_branches(
     try:
         history_rows = (
             db.query(ReleaseHistory.branch)
+            .filter(ReleaseHistory.server_id == server_id)
             .filter(ReleaseHistory.job_name == job.name)
             .filter(ReleaseHistory.branch.isnot(None))
             .distinct()

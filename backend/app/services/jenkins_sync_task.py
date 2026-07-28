@@ -1,194 +1,282 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
+import threading
+
 from loguru import logger
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import SyncSessionLocal
-from app.models.jenkins import JenkinsServer, JenkinsJob
-from app.models.release import ReleaseHistory, ReleaseTask
-from app.services.jenkins_client import JenkinsClient
+from app.models.jenkins import JenkinsJob, JenkinsServer
+from app.models.release import ReleaseHistory
+from app.services.jenkins_client import (
+    JenkinsClient,
+    jenkins_datetime,
+    normalize_jenkins_status,
+)
 
-import threading
 
 _sync_lock = threading.Lock()
 
-from sqlalchemy import func
 
 def cleanup_all_duplicate_histories(db: Session):
-    """
-    Find and purge all duplicate records in release_history with identical (job_name, build_number).
-    Retains the record with the most complete status or highest ID, and deletes the rest.
-    """
+    """Keep one preferred row for each complete Jenkins build identity."""
     try:
-        duplicates = db.query(
-            ReleaseHistory.job_name,
-            ReleaseHistory.build_number,
-            func.count(ReleaseHistory.id).label("count")
-        ).filter(
-            ReleaseHistory.job_name.isnot(None),
-            ReleaseHistory.build_number.isnot(None)
-        ).group_by(
-            ReleaseHistory.job_name,
-            ReleaseHistory.build_number
-        ).having(
-            func.count(ReleaseHistory.id) > 1
-        ).all()
+        duplicates = (
+            db.query(
+                ReleaseHistory.server_id,
+                ReleaseHistory.job_name,
+                ReleaseHistory.build_number,
+                func.count(ReleaseHistory.id).label("count"),
+            )
+            .filter(
+                ReleaseHistory.server_id.isnot(None),
+                ReleaseHistory.job_name.isnot(None),
+                ReleaseHistory.build_number.isnot(None),
+            )
+            .group_by(
+                ReleaseHistory.server_id,
+                ReleaseHistory.job_name,
+                ReleaseHistory.build_number,
+            )
+            .having(func.count(ReleaseHistory.id) > 1)
+            .all()
+        )
 
         for item in duplicates:
-            job_name, build_num = item.job_name, item.build_number
-            entries = db.query(ReleaseHistory).filter(
-                ReleaseHistory.job_name == job_name,
-                ReleaseHistory.build_number == build_num
-            ).order_by(
-                (ReleaseHistory.status != 'BUILDING').desc(),
-                ReleaseHistory.id.desc()
-            ).all()
-
+            entries = (
+                db.query(ReleaseHistory)
+                .filter(
+                    ReleaseHistory.server_id == item.server_id,
+                    ReleaseHistory.job_name == item.job_name,
+                    ReleaseHistory.build_number == item.build_number,
+                )
+                .order_by(
+                    ReleaseHistory.task_id.isnot(None).desc(),
+                    (ReleaseHistory.status != "BUILDING").desc(),
+                    ReleaseHistory.id.desc(),
+                )
+                .all()
+            )
+            for extra in entries[1:]:
+                db.delete(extra)
             if len(entries) > 1:
-                main_entry = entries[0]
-                for extra in entries[1:]:
-                    db.delete(extra)
-                db.commit()
-                logger.info(f"Purged {len(entries) - 1} duplicate entries for job '{job_name}' #{build_num}, kept main ID #{main_entry.id}")
-    except Exception as e:
+                logger.info(
+                    "Purged {} duplicate entries for server {} job '{}' #{}, kept ID #{}",
+                    len(entries) - 1,
+                    item.server_id,
+                    item.job_name,
+                    item.build_number,
+                    entries[0].id,
+                )
+        db.commit()
+    except Exception as exc:
         db.rollback()
-        logger.warning(f"Error during duplicate history cleanup: {str(e)}")
+        logger.warning("Error during duplicate history cleanup: {}", str(exc))
+
+
+def _update_history(
+    history,
+    server,
+    status,
+    started_at,
+    finished_at,
+    duration,
+    trigger_by,
+    branch,
+    logs,
+    raw_response,
+):
+    history.server_name = server.name
+    history.status = status
+    history.started_at = started_at
+    history.finished_at = finished_at
+    history.duration = duration
+    if trigger_by != "Unknown":
+        history.trigger_by = trigger_by
+    if branch != "external":
+        history.branch = branch
+    if logs is not None:
+        history.logs = logs[:200000]
+    history.raw_response = raw_response
+
 
 def sync_external_builds(server_id: Optional[int] = None, job_name: Optional[str] = None):
-    """
-    Background worker task scheduled to scan Jenkins jobs for external manually-triggered builds,
-    and strictly mirror their latest statuses and metadata into release_history.
-    """
+    """Synchronize Jenkins build metadata without treating the recent page as inventory."""
     if not _sync_lock.acquire(blocking=False):
         logger.info("Another sync_external_builds task is already running. Skipping redundant execution.")
         return
 
-    logger.info(f"Syncing external builds strictly mirroring Jenkins (server={server_id}, job={job_name})...")
-    
+    logger.info(
+        "Syncing external builds from Jenkins (server={}, job={})...",
+        server_id,
+        job_name,
+    )
     db: Session = SyncSessionLocal()
     try:
-        # 1. Run global database deduplication purge on start
         cleanup_all_duplicate_histories(db)
 
-        # 2. Fetch active servers
         server_query = db.query(JenkinsServer).filter(JenkinsServer.is_active == 1)
-        if server_id:
+        if server_id is not None:
             server_query = server_query.filter(JenkinsServer.id == server_id)
-        servers = server_query.all()
 
-        for server in servers:
+        for server in server_query.all():
             client = JenkinsClient(server.url, server.username, server.api_token)
-            
-            # 3. Fetch jobs associated with this server
             job_query = db.query(JenkinsJob).filter(JenkinsJob.server_id == server.id)
-            if job_name:
+            if job_name is not None:
                 job_query = job_query.filter(JenkinsJob.name == job_name)
-            jobs = job_query.all()
 
-            for job in jobs:
-                # Retrieve last 20 builds for target job from Jenkins
-                recent_builds = client.get_recent_builds(job.name, limit=20)
-                if not recent_builds:
-                    continue
+            for job in job_query.all():
+                recent_builds = client.get_recent_builds(job.name, limit=20) or []
+                builds = {
+                    build.get("number"): build
+                    for build in recent_builds
+                    if build.get("number") is not None
+                }
 
-                jenkins_build_map = {b.get("number"): b for b in recent_builds if b.get("number")}
-                jenkins_numbers = set(jenkins_build_map.keys())
-
-                # Step A: Update or Insert records strictly based on latest Jenkins data
-                for build_number, build in jenkins_build_map.items():
+                for build_number, build in builds.items():
                     is_building = build.get("building") is True
                     result = build.get("result")
-                    timestamp = build.get("timestamp") or 0
-                    duration_ms = build.get("duration") or 0
-
-                    if is_building:
-                        status = "BUILDING"
-                    else:
-                        status = "SUCCESS" if result == "SUCCESS" else ("UNSTABLE" if result == "UNSTABLE" else "FAILED")
+                    status = normalize_jenkins_status(is_building, result)
+                    duration_ms = build.get("duration")
+                    duration = (
+                        int(duration_ms / 1000)
+                        if isinstance(duration_ms, (int, float)) and duration_ms > 0
+                        else 0
+                    )
+                    started_at = jenkins_datetime(build.get("timestamp")) or datetime.now()
+                    finished_at = None if is_building else started_at + timedelta(seconds=duration)
 
                     trigger_by = "Unknown"
                     branch = "external"
-                    actions = build.get("actions", []) or []
-                    for action in actions:
+                    for action in build.get("actions", []) or []:
                         if not action:
                             continue
-                        causes = action.get("causes", []) or []
-                        for cause in causes:
+                        for cause in action.get("causes", []) or []:
                             if not cause:
                                 continue
                             if cause.get("userName"):
-                                trigger_by = cause.get("userName")
+                                trigger_by = cause["userName"]
                             elif cause.get("shortDescription"):
-                                trigger_by = cause.get("shortDescription")
-                        parameters = action.get("parameters", []) or []
-                        for param in parameters:
-                            p_name = param.get("name", "").lower()
-                            if p_name in ["branch", "branch_name", "tag", "git_branch", "gitparameter"]:
-                                branch = str(param.get("value", ""))
+                                trigger_by = cause["shortDescription"]
+                        for parameter in action.get("parameters", []) or []:
+                            parameter_name = parameter.get("name", "").lower()
+                            if parameter_name in {
+                                "branch", "branch_name", "tag", "git_branch", "gitparameter"
+                            }:
+                                branch = str(parameter.get("value", ""))
 
-                    started_at = datetime.fromtimestamp(timestamp / 1000.0) if timestamp else datetime.now()
-                    finished_at = datetime.fromtimestamp((timestamp + duration_ms) / 1000.0) if (timestamp and duration_ms and not is_building) else None
+                    logs = None
+                    if not is_building:
+                        try:
+                            log_text, _, _ = client.get_progressive_log(job.name, build_number, 0)
+                            logs = (log_text or "")[:200000]
+                        except Exception as exc:
+                            logger.warning(
+                                "Could not archive Jenkins log for server {} job '{}' #{}: {}",
+                                server.id, job.name, build_number, str(exc),
+                            )
 
-                    # Query all matching entries in local database for this (job_name, build_number)
-                    existing_entries = db.query(ReleaseHistory).filter(
-                        ReleaseHistory.job_name == job.name,
-                        ReleaseHistory.build_number == build_number
-                    ).order_by(ReleaseHistory.id.desc()).all()
-
-                    if existing_entries:
-                        main_entry = existing_entries[0]
-                        # Purge duplicate entries if any
-                        if len(existing_entries) > 1:
-                            for extra in existing_entries[1:]:
-                                db.delete(extra)
-                            db.commit()
-
-                        # Overwrite with latest Jenkins status and timestamps
-                        main_entry.status = status
-                        main_entry.started_at = started_at
-                        if not is_building:
-                            main_entry.finished_at = finished_at
-                            main_entry.duration = duration_ms // 1000
-                        if trigger_by != "Unknown":
-                            main_entry.trigger_by = trigger_by
-                        if branch != "external":
-                            main_entry.branch = branch
-                        db.commit()
-                    else:
-                        # Insert brand new external history record
-                        history = ReleaseHistory(
-                            task_id=None,
-                            plan_id=None,
-                            server_name=server.name,
-                            job_name=job.name,
-                            branch=branch,
-                            build_number=build_number,
-                            status=status,
-                            trigger_by=trigger_by,
-                            started_at=started_at,
-                            finished_at=finished_at,
-                            duration=duration_ms // 1000,
-                            logs="",
-                            is_external=True,
-                            raw_response={"final_jenkins_result": result, "external_sync": True}
+                    raw_response = {
+                        "final_jenkins_result": result,
+                        "external_sync": True,
+                        "queueId": build.get("queueId"),
+                    }
+                    existing = (
+                        db.query(ReleaseHistory)
+                        .filter(
+                            ReleaseHistory.server_id == server.id,
+                            ReleaseHistory.job_name == job.name,
+                            ReleaseHistory.build_number == build_number,
                         )
-                        db.add(history)
+                        .order_by(
+                            ReleaseHistory.task_id.isnot(None).desc(),
+                            (ReleaseHistory.status != "BUILDING").desc(),
+                            ReleaseHistory.id.desc(),
+                        )
+                        .first()
+                    )
+                    if existing is not None:
+                        _update_history(
+                            existing, server, status, started_at, finished_at, duration,
+                            trigger_by, branch, logs, raw_response,
+                        )
+                        db.commit()
+                        continue
+
+                    history = ReleaseHistory(
+                        task_id=None,
+                        plan_id=None,
+                        server_id=server.id,
+                        server_name=server.name,
+                        job_name=job.name,
+                        branch=branch,
+                        build_number=build_number,
+                        status=status,
+                        trigger_by=trigger_by,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        duration=duration,
+                        logs=logs or "",
+                        is_external=True,
+                        raw_response=raw_response,
+                    )
+                    db.add(history)
+                    try:
+                        db.commit()
+                    except IntegrityError:
+                        db.rollback()
+                        existing = (
+                            db.query(ReleaseHistory)
+                            .filter(
+                                ReleaseHistory.server_id == server.id,
+                                ReleaseHistory.job_name == job.name,
+                                ReleaseHistory.build_number == build_number,
+                            )
+                            .order_by(
+                                ReleaseHistory.task_id.isnot(None).desc(),
+                                (ReleaseHistory.status != "BUILDING").desc(),
+                                ReleaseHistory.id.desc(),
+                            )
+                            .first()
+                        )
+                        if existing is None:
+                            logger.warning(
+                                "History identity conflicted but could not be reloaded for server {} job '{}' #{}",
+                                server.id, job.name, build_number,
+                            )
+                            continue
+                        _update_history(
+                            existing, server, status, started_at, finished_at, duration,
+                            trigger_by, branch, logs, raw_response,
+                        )
                         db.commit()
 
-                # Step B: Purge stale local external histories that no longer exist in latest Jenkins builds list
-                stale_records = db.query(ReleaseHistory).filter(
-                    ReleaseHistory.server_name == server.name,
-                    ReleaseHistory.job_name == job.name,
-                    ReleaseHistory.is_external.is_(True),
-                    ReleaseHistory.build_number.notin_(jenkins_numbers)
-                ).all()
+                inventory = client.get_build_numbers(job.name)
+                if inventory is None:
+                    logger.warning(
+                        "Skipping history deletion because Jenkins inventory is unavailable for server {} job '{}'",
+                        server.id, job.name,
+                    )
+                    continue
+                stale_records = (
+                    db.query(ReleaseHistory)
+                    .filter(
+                        ReleaseHistory.server_id == server.id,
+                        ReleaseHistory.job_name == job.name,
+                        ReleaseHistory.is_external.is_(True),
+                        ReleaseHistory.build_number.notin_(inventory),
+                    )
+                    .all()
+                )
+                for stale_record in stale_records:
+                    db.delete(stale_record)
                 if stale_records:
-                    for s_rec in stale_records:
-                        db.delete(s_rec)
                     db.commit()
-
-    except Exception as e:
-        logger.error(f"Error during scheduled external build sync: {str(e)}")
+    except Exception as exc:
+        db.rollback()
+        logger.error("Error during scheduled external build sync: {}", str(exc))
     finally:
         db.close()
         if _sync_lock.locked():

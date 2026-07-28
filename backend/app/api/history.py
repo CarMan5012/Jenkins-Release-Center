@@ -9,7 +9,7 @@ from app.models.release import ReleaseHistory, ReleaseTask
 from app.models.jenkins import JenkinsServer
 from app.schemas.release import ReleaseHistoryResponse, BuildLogResponse
 from app.services.jenkins_client import JenkinsClient
-from app.services.jenkins_sync_task import sync_external_builds, cleanup_all_duplicate_histories
+from app.services.jenkins_sync_task import sync_external_builds
 
 router = APIRouter()
 
@@ -23,10 +23,6 @@ def list_histories(
     limit: int = 20,
     current_user: str = Depends(get_current_user)
 ):
-    # Auto purge duplicates on page 1 fetch for seamless UX
-    if page == 1:
-        cleanup_all_duplicate_histories(db)
-
     offset = (page - 1) * limit
     stmt = db.query(ReleaseHistory).order_by(desc(ReleaseHistory.created_at))
     if job_name:
@@ -108,8 +104,13 @@ def get_history_logs(
         
     # Lazy-load or stream progressive logs from Jenkins if logs cache is missing or currently BUILDING
     if not history.logs or history.status == "BUILDING":
-        if history.server_name and history.job_name and history.build_number:
-            server = db.query(JenkinsServer).filter(JenkinsServer.name == history.server_name).first()
+        if history.job_name is not None and history.build_number is not None:
+            if history.server_id is not None:
+                server = db.get(JenkinsServer, history.server_id)
+            elif history.server_name is not None:
+                server = db.query(JenkinsServer).filter(JenkinsServer.name == history.server_name).first()
+            else:
+                server = None
             if server:
                 try:
                     client = JenkinsClient(server.url, server.username, server.api_token)

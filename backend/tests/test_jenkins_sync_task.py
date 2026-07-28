@@ -83,6 +83,7 @@ def test_sync_external_builds_success(mock_client_class, mock_session_local):
     record = history_records[0]
     assert record.task_id is None
     assert record.plan_id is None
+    assert record.server_id == 1
     assert record.server_name == "test-server"
     assert record.job_name == "frontend-build"
     assert record.branch == "release/2026.07"
@@ -92,6 +93,9 @@ def test_sync_external_builds_success(mock_client_class, mock_session_local):
     assert record.duration == 120
     assert record.is_external is True
     assert record.logs == "Jenkins build logs chunk."
+    assert record.raw_response["final_jenkins_result"] == "SUCCESS"
+    assert record.raw_response["external_sync"] is True
+    assert record.raw_response.get("queueId") is None
     
     # 5. Verification of idempotency: running sync again shouldn't create duplicated histories
     sync_external_builds()

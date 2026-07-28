@@ -9,11 +9,54 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
-from app.models.jenkins import JenkinsServer
-from app.models.release import ReleasePlan, ReleaseTask
+from app.models.jenkins import JenkinsJob, JenkinsServer
+from app.models.release import ReleaseHistory, ReleasePlan, ReleaseTask
 from app.models.user import User
 
-from app.services import jenkins_client, release_service
+from app.services import jenkins_client, jenkins_sync_task, release_service
+
+
+def external_history_session(server_count=1):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    for server_id in range(1, server_count + 1):
+        db.add(
+            JenkinsServer(
+                id=server_id,
+                name=f"jenkins-{server_id}",
+                url=f"http://jenkins-{server_id}.example",
+                username="admin",
+                api_token="token",
+            )
+        )
+        db.add(JenkinsJob(id=server_id, server_id=server_id, name="deploy"))
+    db.commit()
+    return db
+
+
+def run_external_sync(db, clients):
+    with (
+        patch.object(jenkins_sync_task, "SyncSessionLocal", return_value=db),
+        patch.object(
+            jenkins_sync_task,
+            "JenkinsClient",
+            side_effect=lambda url, *_: clients[url],
+        ),
+    ):
+        jenkins_sync_task.sync_external_builds()
+
+
+def external_build(number, result="SUCCESS"):
+    return {
+        "number": number,
+        "result": result,
+        "building": False,
+        "timestamp": 1_700_000_000_000,
+        "duration": 5_000,
+        "queueId": 1000 + number,
+        "actions": [],
+    }
 
 def session_with_reconcile_task(**task_values):
     engine = create_engine("sqlite:///:memory:")
@@ -394,7 +437,6 @@ def test_finalize_task_claims_terminal_state_once(
     assert success.call_count + failure.call_count == 1
 
 from app.api import release as release_api
-from app.models.release import ReleaseHistory
 
 
 def test_plan_get_endpoints_are_read_only():
@@ -561,3 +603,119 @@ def test_workflow_keeps_polling_unknown_jenkins_result():
     assert client.get_build_status.call_count == 2
     assert finished_task.status == "SUCCESS"
     success.assert_called_once_with(db, task.plan_id, task.id)
+
+
+def test_external_sync_preserves_history_outside_recent_window():
+    db = external_history_session()
+    db.add_all(
+        [
+            ReleaseHistory(
+                server_id=1,
+                server_name="jenkins-1",
+                job_name="deploy",
+                build_number=number,
+                status="SUCCESS",
+                is_external=True,
+            )
+            for number in range(1, 22)
+        ]
+    )
+    db.commit()
+    client = MagicMock()
+    client.get_recent_builds.return_value = [
+        external_build(number) for number in range(2, 22)
+    ]
+    client.get_build_numbers.return_value = set(range(1, 22))
+    client.get_progressive_log.return_value = ("log", 3, False)
+
+    run_external_sync(db, {"http://jenkins-1.example": client})
+
+    assert [
+        row.build_number
+        for row in db.query(ReleaseHistory).order_by(ReleaseHistory.build_number)
+    ] == list(range(1, 22))
+
+
+def test_external_sync_does_not_delete_when_inventory_is_unavailable():
+    db = external_history_session()
+    db.add(
+        ReleaseHistory(
+            server_id=1,
+            server_name="jenkins-1",
+            job_name="deploy",
+            build_number=1,
+            status="SUCCESS",
+            is_external=True,
+        )
+    )
+    db.commit()
+    client = MagicMock()
+    client.get_recent_builds.return_value = []
+    client.get_build_numbers.return_value = None
+
+    run_external_sync(db, {"http://jenkins-1.example": client})
+
+    assert db.query(ReleaseHistory).count() == 1
+    client.get_build_numbers.assert_called_once_with("deploy")
+
+
+def test_external_sync_isolates_same_build_identity_by_server():
+    db = external_history_session(server_count=2)
+    clients = {}
+    for server_id in (1, 2):
+        client = MagicMock()
+        client.get_recent_builds.return_value = [external_build(7)]
+        client.get_build_numbers.return_value = {7}
+        client.get_progressive_log.return_value = (f"server-{server_id}", 8, False)
+        clients[f"http://jenkins-{server_id}.example"] = client
+
+    run_external_sync(db, clients)
+
+    histories = db.query(ReleaseHistory).order_by(ReleaseHistory.server_id).all()
+    assert [(row.server_id, row.job_name, row.build_number) for row in histories] == [
+        (1, "deploy", 7),
+        (2, "deploy", 7),
+    ]
+
+
+def test_external_sync_maps_aborted_build_to_cancelled():
+    db = external_history_session()
+    client = MagicMock()
+    client.get_recent_builds.return_value = [external_build(7, result="ABORTED")]
+    client.get_build_numbers.return_value = {7}
+    client.get_progressive_log.return_value = ("cancelled", 9, False)
+
+    run_external_sync(db, {"http://jenkins-1.example": client})
+
+    assert db.query(ReleaseHistory).one().status == "CANCELLED"
+
+
+def test_external_sync_keeps_internal_history_associations():
+    db = external_history_session()
+    db.add(
+        ReleaseHistory(
+            task_id=99,
+            plan_id=88,
+            server_id=1,
+            server_name="jenkins-1",
+            job_name="deploy",
+            build_number=7,
+            status="BUILDING",
+            is_external=False,
+        )
+    )
+    db.commit()
+    client = MagicMock()
+    client.get_recent_builds.return_value = [external_build(7)]
+    client.get_build_numbers.return_value = {7}
+    client.get_progressive_log.return_value = ("done", 4, False)
+
+    run_external_sync(db, {"http://jenkins-1.example": client})
+
+    history = db.query(ReleaseHistory).one()
+    assert (history.task_id, history.plan_id, history.is_external) == (99, 88, False)
+    assert history.raw_response == {
+        "final_jenkins_result": "SUCCESS",
+        "external_sync": True,
+        "queueId": 1007,
+    }
