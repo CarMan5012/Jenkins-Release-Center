@@ -66,26 +66,25 @@ def ensure_jenkins_consistency_schema(engine) -> None:
                 "ALTER TABLE release_history ADD COLUMN server_id INTEGER NULL"
             ))
 
-        connection.execute(text(
-            "UPDATE release_history SET server_id = ("
-            "SELECT MIN(jenkins_server.id) FROM jenkins_server "
-            "WHERE jenkins_server.name = release_history.server_name"
-            ") WHERE server_id IS NULL AND server_name IN ("
-            "SELECT name FROM jenkins_server GROUP BY name HAVING COUNT(*) = 1"
-            ")"
-        ))
-
         rows = connection.execute(text(
-            "SELECT id, server_id, job_name, build_number, task_id "
-            "FROM release_history WHERE server_id IS NOT NULL "
-            "ORDER BY server_id, job_name, build_number, "
+            "SELECT release_history.id, COALESCE(release_history.server_id, ("
+            "SELECT MIN(jenkins_server.id) FROM jenkins_server "
+            "WHERE jenkins_server.name = release_history.server_name "
+            "HAVING COUNT(*) = 1"
+            ")) AS effective_server_id, job_name, build_number, task_id "
+            "FROM release_history "
+            "ORDER BY effective_server_id, job_name, build_number, "
             "CASE WHEN task_id IS NOT NULL THEN 0 ELSE 1 END, id DESC"
         ))
         seen = set()
         duplicate_ids = []
         for row in rows:
-            identity = (row.server_id, row.job_name, row.build_number)
-            if row.job_name is None or row.build_number is None:
+            identity = (row.effective_server_id, row.job_name, row.build_number)
+            if (
+                row.effective_server_id is None
+                or row.job_name is None
+                or row.build_number is None
+            ):
                 continue
             if identity in seen:
                 duplicate_ids.append(row.id)
@@ -98,6 +97,15 @@ def ensure_jenkins_consistency_schema(engine) -> None:
                 .bindparams(bindparam("duplicate_ids", expanding=True)),
                 {"duplicate_ids": duplicate_ids},
             )
+
+        connection.execute(text(
+            "UPDATE release_history SET server_id = ("
+            "SELECT MIN(jenkins_server.id) FROM jenkins_server "
+            "WHERE jenkins_server.name = release_history.server_name"
+            ") WHERE server_id IS NULL AND server_name IN ("
+            "SELECT name FROM jenkins_server GROUP BY name HAVING COUNT(*) = 1"
+            ")"
+        ))
 
     if not matching_indexes:
         with engine.begin() as connection:

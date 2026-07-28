@@ -85,3 +85,38 @@ def test_schema_upgrade_rejects_same_name_non_unique_index():
     with engine.connect() as connection:
         ids = connection.execute(text("SELECT id FROM release_history ORDER BY id")).scalars().all()
     assert ids == [1, 2]
+
+
+def test_schema_upgrade_deduplicates_before_server_backfill():
+    from app.services.init_db import ensure_jenkins_consistency_schema
+
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE jenkins_server (id INTEGER PRIMARY KEY, name VARCHAR(100))"))
+        connection.execute(text("CREATE TABLE release_task (id INTEGER PRIMARY KEY, build_number INTEGER)"))
+        connection.execute(text(
+            "CREATE TABLE release_history ("
+            "id INTEGER PRIMARY KEY, task_id INTEGER, server_id INTEGER, "
+            "server_name VARCHAR(100), job_name VARCHAR(150), "
+            "build_number INTEGER, status VARCHAR(30))"
+        ))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX uix_release_history_build_identity "
+            "ON release_history (server_id, job_name, build_number)"
+        ))
+        connection.execute(text("INSERT INTO jenkins_server (id, name) VALUES (1, 's1')"))
+        connection.execute(text(
+            "INSERT INTO release_history "
+            "(id, task_id, server_id, server_name, job_name, build_number, status) VALUES "
+            "(1, 10, NULL, 's1', 'deploy', 7, 'SUCCESS'), "
+            "(2, NULL, NULL, 's1', 'deploy', 7, 'SUCCESS')"
+        ))
+
+    ensure_jenkins_consistency_schema(engine)
+    ensure_jenkins_consistency_schema(engine)
+
+    with engine.connect() as connection:
+        rows = connection.execute(text(
+            "SELECT id, task_id, server_id FROM release_history ORDER BY id"
+        )).all()
+    assert [tuple(row) for row in rows] == [(1, 10, 1)]
