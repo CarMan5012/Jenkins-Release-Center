@@ -16,33 +16,40 @@
 
 卡片底部保留一个“查看 Jenkins”按钮，链接到第一个有效 Jenkins View URL。没有 View URL 时链接到第一个任务所属 Jenkins Server URL。
 
+颜色只用于标题、状态和成功/失败数字：
+
+- 开始：蓝色 `#1677FF`。
+- 成功：绿色 `#52C41A`。
+- 失败：红色 `#FF4D4F`。
+- 取消：灰色 `#8C8C8C`。
+
 ## 卡片
 
 ### 开始
 
 ```markdown
-### 发布开始
+### <font color="#1677FF">发布开始</font>
 
 **计划**：{plan_name}
 **环境**：{jenkins_views}
 **Job**：{total_jobs}
-**状态**：执行中
+**状态**：<font color="#1677FF">执行中</font>
 ```
 
 ### 成功
 
 ```markdown
-### 发布成功
+### <font color="#52C41A">发布成功</font>
 
 **计划**：{plan_name}
 **环境**：{jenkins_views}
-**结果**：成功 {success_count} / 失败 {failed_count}
+**结果**：成功 <font color="#52C41A">{success_count}</font> / 失败 <font color="#FF4D4F">{failed_count}</font>
 **耗时**：{duration}
 ```
 
 ### 失败或取消
 
-正文与成功卡片相同，只把标题替换为 `发布失败` 或 `发布取消`，结果使用实际成功/失败数量。
+正文与成功卡片相同。失败标题使用红色，取消标题使用灰色；成功数量保持绿色，失败数量保持红色。
 
 ## 数据规则
 
@@ -57,5 +64,6 @@
 - 同一计划只发送一张开始卡片和一张终态卡片。
 - 环境正确处理单 View、多 View 和无 View。
 - 成功、失败、取消标题正确，数量和耗时正确。
+- 颜色只出现在标题、状态和成功/失败数字。
 - 卡片只有一个“查看 Jenkins”按钮，URL 按环境规则降级。
 - 单 Job 过程通知继续保持关闭。
