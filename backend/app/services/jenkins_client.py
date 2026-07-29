@@ -56,7 +56,11 @@ class JenkinsClient:
         if url_clean.endswith('/login'):
             url_clean = url_clean[:-6]
         self.base_url = url_clean if url_clean.endswith('/') else url_clean + '/'
-        self.username = username
+        try:
+            self.username = decrypt_secret(username)
+        except Exception:
+            self.username = username
+            
         try:
             self.token = decrypt_secret(encrypted_token)
         except Exception:

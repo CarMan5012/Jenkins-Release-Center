@@ -682,10 +682,15 @@ def execute_jenkins_backup(server_id: int, backup_id: int):
     except Exception:
         decrypted_token = server.api_token
 
+    try:
+        decrypted_username = decrypt_secret(server.username)
+    except Exception:
+        decrypted_username = server.username
+
     # Setup Session
     session = requests.Session()
-    if server.username and decrypted_token:
-        session.auth = HTTPBasicAuth(server.username, decrypted_token)
+    if decrypted_username and decrypted_token:
+        session.auth = HTTPBasicAuth(decrypted_username, decrypted_token)
 
     # Persistent storage receives encrypted files only; plaintext stays in tmpfs/temp.
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -701,8 +706,8 @@ def execute_jenkins_backup(server_id: int, backup_id: int):
         os.makedirs(temp_root)
         enc_filepath = os.path.join(backups_root, f"backup_{backup_id}.zip.enc")
 
-        # 1. Fetch recursively all jobs
-        all_jobs = get_all_jobs_recursive(session, base_url)
+        # 1. Fetch recursively all jobs (raise errors if API request fails, e.g., 401 Unauthorized)
+        all_jobs = get_all_jobs_recursive(session, base_url, raise_errors=True)
         all_parsed_info = {}
         backed_up_count = 0
 

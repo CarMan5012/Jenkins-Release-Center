@@ -356,8 +356,12 @@ async function loadDashboard(trigger?: 'page' | 'refresh' | 'list' | 'poll') {
     servers.value = statsRes.data.servers || [];
     recentHistory.value = statsRes.data.recent_history || [];
     plans.value = plansRes.data || [];
+    if (trigger === 'refresh' || trigger === 'list') {
+      message.success('刷新成功');
+    }
   } catch (err: any) {
-    error.value = err.message || 'Dashboard 加载失败。';
+    error.value = err.message || 'Dashboard 加载失败';
+    message.error(err.message || '刷新失败');
   } finally {
     const elapsed = Date.now() - startTime;
     if (elapsed < 500) {
@@ -375,7 +379,7 @@ async function runAction(key: string, action: () => Promise<void>) {
     await action();
     await loadDashboard();
   } catch (err: any) {
-    message.error(err.message || '操作失败。');
+    message.error(err.message || '操作失败');
   } finally {
     busyKey.value = '';
   }
@@ -383,12 +387,12 @@ async function runAction(key: string, action: () => Promise<void>) {
 
 function triggerPlan(plan: ReleasePlan) {
   if (isPreflightBlocked(plan.preflight_status)) {
-    message.warning('请先完成并通过检测。');
+    message.warning('请先完成并通过检测');
     return;
   }
   const execute = () => runAction(`run-${plan.id}`, async () => {
     await request.post(`/release/plans/${plan.id}/trigger`);
-    message.success('已触发执行。');
+    message.success('已触发执行');
   });
   if (plan.preflight_status === 'WARNING') {
     dialog.warning({
@@ -412,12 +416,12 @@ function triggerPlan(plan: ReleasePlan) {
 function cancelPlan(plan: ReleasePlan) {
   dialog.warning({
     title: '停止发布任务',
-    content: `确认停止 ${plan.name}？`,
+    content: `确认停止 ${plan.name}`,
     positiveText: '停止',
     negativeText: '取消',
     onPositiveClick: () => runAction(`stop-${plan.id}`, async () => {
       await request.post(`/release/plans/${plan.id}/cancel`);
-      message.success('已停止。');
+      message.success('已停止');
     }),
   });
 }
@@ -431,12 +435,12 @@ function editPlan(plan: ReleasePlan) {
 function deletePlan(plan: ReleasePlan) {
   dialog.error({
     title: '删除发布计划',
-    content: `确认删除 ${plan.name}？`,
+    content: `确认删除 ${plan.name}`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: () => runAction(`delete-${plan.id}`, async () => {
       await request.delete(`/release/plans/${plan.id}`);
-      message.success('已删除。');
+      message.success('已删除');
     }),
   });
 }
@@ -519,49 +523,50 @@ onUnmounted(() => {
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  overflow: hidden;
-  background: var(--surface-solid);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
+  gap: 16px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }
 
 .metric-tile {
-  min-height: 112px;
-  padding: 18px 20px;
+  min-height: 116px;
+  padding: 20px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  border: 0;
-  border-right: 1px solid var(--line-soft);
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  transition: background 0.16s ease;
-}
-
-.metric-tile:last-child {
-  border-right: 0;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: var(--radius-lg, 16px);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03);
+  transition: all 0.28s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
 .metric-tile:hover {
-  border-color: var(--line-soft);
-  background: #fafafa;
+  transform: translateY(-3px);
+  border-color: rgba(0, 113, 227, 0.3);
+  box-shadow: 0 10px 30px rgba(0, 113, 227, 0.1);
+  background: rgba(255, 255, 255, 0.88);
 }
 
 .metric-tile span {
   color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 12.5px;
+  font-weight: 550;
+  letter-spacing: -0.01em;
 }
 
 .metric-tile strong {
-  margin: 8px 0;
-  color: var(--text);
-  font-size: 30px;
-  font-weight: 650;
+  margin: 6px 0;
+  background: linear-gradient(135deg, #1d1d1f 0%, #0071e3 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-size: 32px;
+  font-weight: 700;
   line-height: 1.1;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.035em;
   word-break: break-word;
 }
 

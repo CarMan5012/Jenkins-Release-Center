@@ -5,7 +5,7 @@
         <h1>发布计划</h1>
         <p>创建、排程和管理 Jenkins 发布任务。</p>
       </div>
-      <n-button type="primary" @click="openCreateWizard">创建发布计划</n-button>
+      <UiverseButton variant="primary" @click="openCreateWizard">创建发布计划</UiverseButton>
     </div>
 
     <n-alert v-if="error" type="error" :bordered="false" class="state-alert">
@@ -228,6 +228,7 @@ import {
 import PreflightResult from '../../components/PreflightResult.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
+import UiverseButton from '../../components/uiverse/UiverseButton.vue';
 import request from '../../utils/request';
 import { filterPlans, formatDateTime, formatPlanType, getPreflightMeta, getQuickExecuteTime, isPreflightBlocked, sortPlans, getWeekDay } from '../../utils/release-ui';
 import type { PreflightStatus } from '../../utils/release-ui';
@@ -375,8 +376,12 @@ async function loadPlans(trigger?: 'page' | 'refresh') {
   try {
     const res = await request.get('/release/plans');
     plans.value = res.data || [];
+    if (trigger === 'refresh') {
+      message.success('刷新成功');
+    }
   } catch (err: any) {
-    error.value = err.message || '发布计划加载失败。';
+    error.value = err.message || '发布计划加载失败';
+    message.error(err.message || '刷新失败');
   } finally {
     const elapsed = Date.now() - startTime;
     if (elapsed < 500) {
@@ -392,7 +397,7 @@ async function loadServers() {
     const res = await request.get('/jenkins/servers');
     servers.value = res.data || [];
   } catch (err: any) {
-    message.error(err.message || 'Jenkins 实例加载失败。');
+    message.error(err.message || 'Jenkins 实例加载失败');
   }
 }
 
@@ -402,7 +407,7 @@ async function runAction(key: string, action: () => Promise<void>) {
     await action();
     await loadPlans();
   } catch (err: any) {
-    message.error(err.message || '操作失败。');
+    message.error(err.message || '操作失败');
   } finally {
     busyKey.value = '';
   }
@@ -411,17 +416,17 @@ async function runAction(key: string, action: () => Promise<void>) {
 function triggerPlan(plan: ReleasePlan) {
   if (busyKey.value === `preflight-${plan.id}`) return;
   if (isPreflightBlocked(plan.preflight_status)) {
-    message.warning('请先完成并通过检测。');
+    message.warning('请先完成并通过检测');
     return;
   }
   const execute = () => runAction(`run-${plan.id}`, async () => {
     await request.post(`/release/plans/${plan.id}/trigger`);
-    message.success('已触发执行。');
+    message.success('已触发执行');
   });
   if (plan.preflight_status === 'WARNING') {
     dialog.warning({
       title: '检测存在警告',
-      content: `计划 [${plan.name}] 检测存在警告，是否现在立即运行？`,
+      content: `计划 [${plan.name}] 检测存在警告，是否现在立即运行`,
       positiveText: '仍然运行',
       negativeText: '取消',
       onPositiveClick: execute,
@@ -430,7 +435,7 @@ function triggerPlan(plan: ReleasePlan) {
   }
   dialog.info({
     title: '运行确认',
-    content: `是否现在立即运行发布计划 [${plan.name}]？`,
+    content: `是否现在立即运行发布计划 [${plan.name}]`,
     positiveText: '立即运行',
     negativeText: '取消',
     onPositiveClick: execute,
@@ -445,7 +450,7 @@ async function preflightPlan(plan: ReleasePlan) {
     showPreflight.value = true;
     await loadPlans();
   } catch (err: any) {
-    message.error(err.message || '检测失败。');
+    message.error(err.message || '检测失败');
   } finally {
     busyKey.value = '';
   }
@@ -454,12 +459,12 @@ async function preflightPlan(plan: ReleasePlan) {
 function cancelPlan(plan: ReleasePlan) {
   dialog.warning({
     title: '停止发布计划',
-    content: `确认停止 ${plan.name}？`,
+    content: `确认停止 ${plan.name}`,
     positiveText: '停止',
     negativeText: '取消',
     onPositiveClick: () => runAction(`cancel-${plan.id}`, async () => {
       await request.post(`/release/plans/${plan.id}/cancel`);
-      message.success('已停止。');
+      message.success('已停止');
     }),
   });
 }
@@ -467,12 +472,12 @@ function cancelPlan(plan: ReleasePlan) {
 function deletePlan(plan: ReleasePlan) {
   dialog.error({
     title: '删除发布计划',
-    content: `确认删除 ${plan.name}？`,
+    content: `确认删除 ${plan.name}`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: () => runAction(`delete-${plan.id}`, async () => {
       await request.delete(`/release/plans/${plan.id}`);
-      message.success('已删除。');
+      message.success('已删除');
     }),
   });
 }
@@ -581,11 +586,11 @@ async function openEditWizard(plan: ReleasePlan) {
 function nextStep() {
   if (currentStep.value === 1) {
     if (!wizardForm.value.name.trim()) {
-      message.error('请填写计划名称。');
+      message.error('请填写计划名称');
       return;
     }
     if (wizardForm.value.type !== 'IMMEDIATE' && !wizardForm.value.execute_time) {
-      message.error('请设置调度时间。');
+      message.error('请设置调度时间');
       return;
     }
   }
@@ -593,19 +598,19 @@ function nextStep() {
     for (let i = 0; i < wizardForm.value.tasks.length; i++) {
       const task = wizardForm.value.tasks[i];
       if (!task.server_id) {
-        message.error(`任务 #${i + 1} 请选择 Jenkins 实例。`);
+        message.error(`任务 #${i + 1} 请选择 Jenkins 实例`);
         return;
       }
       if (!task.view_id) {
-        message.error(`任务 #${i + 1} 请选择 View 视图。`);
+        message.error(`任务 #${i + 1} 请选择 View 视图`);
         return;
       }
       if (!task.job_id) {
-        message.error(`任务 #${i + 1} 请选择 Job 任务。`);
+        message.error(`任务 #${i + 1} 请选择 Job 任务`);
         return;
       }
       if (!task.branch) {
-        message.error(`任务 #${i + 1} 请选择或手动输入分支/Tag。`);
+        message.error(`任务 #${i + 1} 请选择或手动输入分支/Tag`);
         return;
       }
     }
@@ -641,7 +646,7 @@ async function loadTaskBranches(serverId: number, jobId: number, index: number) 
     taskBranchOptions.value[index] = (res.data || []).map((branch: string) => ({ label: branch, value: branch }));
   } catch (err: any) {
     taskBranchOptions.value[index] = [];
-    message.warning(err.response?.data?.detail || '未获取到分支列表，您可以直接手动输入分支或 Tag。');
+    message.warning(err.response?.data?.detail || '未获取到分支列表，您可以直接手动输入分支或 Tag');
   }
 }
 
@@ -655,7 +660,7 @@ async function onTaskServerChange(value: number, index: number) {
   taskBranchOptions.value[index] = [];
   const server = servers.value.find((item) => item.id === value);
   if (server && !server.is_active) {
-    message.warning('该 Jenkins 实例已被禁用，请先启用后再选择。');
+    message.warning('该 Jenkins 实例已被禁用，请先启用后再选择');
     task.server_id = null;
     return;
   }
@@ -715,7 +720,7 @@ async function submitPlan() {
     const response = wizardMode.value === 'edit' && editingPlanId.value
       ? await request.put(`/release/plans/${editingPlanId.value}`, payload)
       : await request.post('/release/plans', payload);
-    message.success(wizardMode.value === 'edit' ? '发布计划已更新。' : '发布计划已创建。');
+    message.success(wizardMode.value === 'edit' ? '发布计划已更新' : '发布计划已创建');
     showWizard.value = false;
     if (response.data.preflight_status === 'FAILED') {
       selectedPreflight.value = response.data;
@@ -723,7 +728,7 @@ async function submitPlan() {
     }
     await loadPlans();
   } catch (err: any) {
-    message.error(err.message || '提交失败。');
+    message.error(err.message || '提交失败');
   } finally {
     submitLoading.value = false;
   }

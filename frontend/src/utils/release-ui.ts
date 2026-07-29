@@ -29,6 +29,7 @@ const STATUS_META: Record<string, StatusMeta> = {
   UNSTABLE: { label: '不稳定', tone: 'warning' },
   ABORTED: { label: '已中止', tone: 'warning' },
   NOT_BUILT: { label: '未构建', tone: 'neutral' },
+  UNKNOWN: { label: '未知', tone: 'neutral' },
 };
 
 const PREFLIGHT_META: Record<PreflightStatus, StatusMeta> = {

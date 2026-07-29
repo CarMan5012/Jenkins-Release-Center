@@ -42,7 +42,7 @@ request.interceptors.response.use(
       const loginUrl = baseUrl.endsWith('/') ? `${baseUrl}login` : `${baseUrl}/login`;
       window.location.href = loginUrl;
     }
-    const message = error.response?.data?.detail || error.response?.data?.message || error.message || 'API 请求失败。';
+    const message = error.response?.data?.detail || error.response?.data?.message || error.message || 'API 请求失败';
     return Promise.reject(new Error(message));
   }
 );

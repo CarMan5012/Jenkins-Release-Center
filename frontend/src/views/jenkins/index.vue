@@ -5,7 +5,7 @@
         <h1>Jenkins 集成</h1>
         <p>管理实例、同步 View 和 Job，用于发布计划调度。</p>
       </div>
-      <n-button type="primary" @click="openServerModal()">添加实例</n-button>
+      <UiverseButton variant="primary" @click="openServerModal()">添加实例</UiverseButton>
     </div>
 
     <n-alert v-if="error" type="error" :bordered="false" class="state-alert">
@@ -113,7 +113,12 @@
         <n-form-item label="Base URL" path="url"><n-input v-model:value="serverForm.url" placeholder="http://jenkins.example.com" /></n-form-item>
         <n-form-item label="用户名" path="username"><n-input v-model:value="serverForm.username" /></n-form-item>
         <n-form-item label="API Token" :path="editingServerId ? undefined : 'api_token'">
-          <n-input v-model:value="serverForm.api_token" type="password" show-password-on="click" :placeholder="editingServerId ? '留空表示不修改' : '必填'" />
+          <n-input
+            v-model:value="serverForm.api_token"
+            type="password"
+            show-password-on="click"
+            placeholder="请输入 API Token 或 密码"
+          />
         </n-form-item>
         <n-form-item label="描述"><n-input v-model:value="serverForm.description" type="textarea" /></n-form-item>
         <n-form-item label="启用"><n-switch v-model:value="serverForm.is_active" :checked-value="1" :unchecked-value="0" /></n-form-item>
@@ -168,6 +173,7 @@ import {
 import type { FormInst, FormRules } from 'naive-ui';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
+import UiverseButton from '../../components/uiverse/UiverseButton.vue';
 import BackupDrawer from './BackupDrawer.vue';
 import request from '../../utils/request';
 import { encryptData } from '../../utils/crypto';
@@ -178,6 +184,7 @@ interface JenkinsServer {
   name: string;
   url: string;
   username: string;
+  api_token?: string;
   description?: string | null;
   is_active: number;
 }
@@ -257,7 +264,7 @@ function pollSyncStatus(serverId: number) {
         if (selectedServerId.value === serverId) {
           await selectServer(serverId);
         }
-        message.success('数据同步已完成。');
+        message.success('数据同步已完成');
       }
     } catch (err) {
       clearInterval(interval);
@@ -267,7 +274,7 @@ function pollSyncStatus(serverId: number) {
     if (attempts >= maxAttempts) {
       clearInterval(interval);
       delete syncingServers.value[serverId];
-      message.warning('同步已在后台处理，请稍后刷新查看。');
+      message.warning('同步已在后台处理，请稍后刷新查看');
     }
   }, 2000);
 }
@@ -328,7 +335,7 @@ async function loadServers() {
       }
     }
   } catch (err: any) {
-    error.value = err.message || 'Jenkins 实例加载失败。';
+    error.value = err.message || 'Jenkins 实例加载失败';
   } finally {
     loading.value = false;
   }
@@ -347,7 +354,7 @@ async function selectServer(id: number) {
     views.value = res.data || [];
     if (views.value.length) await selectView(views.value[0].id);
   } catch (err: any) {
-    message.error(err.message || 'View 加载失败。');
+    message.error(err.message || 'View 加载失败');
   }
 }
 
@@ -367,8 +374,11 @@ async function loadJobs(trigger?: 'page' | 'refresh') {
   try {
     const res = await request.get(`/jenkins/servers/${selectedServerId.value}/views/${selectedViewId.value}/jobs`);
     jobs.value = res.data || [];
+    if (trigger === 'refresh') {
+      message.success('刷新成功');
+    }
   } catch (err: any) {
-    message.error(err.message || 'Job 加载失败。');
+    message.error(err.message || 'Job 加载失败');
   } finally {
     const elapsed = Date.now() - startTime;
     if (elapsed < 500) {
@@ -385,7 +395,7 @@ async function runServerAction(key: string, action: () => Promise<void>) {
     await action();
     await loadServers();
   } catch (err: any) {
-    message.error(err.message || '操作失败。');
+    message.error(err.message || '操作失败');
   } finally {
     busyKey.value = '';
   }
@@ -394,39 +404,65 @@ async function runServerAction(key: string, action: () => Promise<void>) {
 function testConnection(server: JenkinsServer) {
   runServerAction(`test-${server.id}`, async () => {
     const res = await request.post(`/jenkins/servers/${server.id}/test`);
-    if (res.data.success) message.success(res.data.message || '连接正常。');
-    else message.error(res.data.message || '连接失败。');
+    if (res.data.success) message.success(res.data.message || '连接正常');
+    else message.error(res.data.message || '连接失败');
   });
 }
 
 function syncServer(server: JenkinsServer) {
   runServerAction(`sync-${server.id}`, async () => {
     const res = await request.post(`/jenkins/servers/${server.id}/sync`);
-    message.success(res.data.message || '已触发后台同步。');
+    message.success(res.data.message || '已触发后台同步');
     pollSyncStatus(server.id);
   });
 }
 
 function deleteServer(server: JenkinsServer) {
   dialog.error({
-    title: '删除 Jenkins 实例',
-    content: `确认删除 ${server.name}？同步的 View 和 Job 也会清理。`,
-    positiveText: '删除',
+    title: '⚠️ 强制删除 Jenkins 实例',
+    content: `确认强制删除实例「${server.name}」吗？\n\n警告：此操作不仅会清理同步的 View 和 Job，还会将依赖该实例的所有发布计划 (ReleasePlan)、发布任务 (ReleaseTask) 以及相关的发布历史记录 (ReleaseHistory) 一并彻底强制删除！\n\n该操作不可恢复，请谨慎确认！`,
+    positiveText: '确认强制删除',
     negativeText: '取消',
     onPositiveClick: () => runServerAction(`delete-${server.id}`, async () => {
-      await request.delete(`/jenkins/servers/${server.id}`);
-      message.success('已删除。');
+      const res = await request.delete(`/jenkins/servers/${server.id}`);
+      message.success(res.data?.message || '已成功强制删除');
     }),
   });
 }
 
-function openServerModal(server?: JenkinsServer) {
+let originalUsername = '';
+let originalToken = '';
+
+async function openServerModal(server?: JenkinsServer) {
   editingServerId.value = server?.id || null;
+  let username = server?.username || '';
+  let api_token = server?.api_token || '';
+
+  if (username && username.startsWith('enc:')) {
+    try {
+      const res = await request.post('/system/decrypt-field', { text: username });
+      username = res.data.decrypted;
+    } catch (err) {
+      console.error('Failed to decrypt username:', err);
+    }
+  }
+  if (api_token && api_token.startsWith('enc:')) {
+    try {
+      const res = await request.post('/system/decrypt-field', { text: api_token });
+      api_token = res.data.decrypted;
+    } catch (err) {
+      console.error('Failed to decrypt api_token:', err);
+    }
+  }
+
+  originalUsername = username;
+  originalToken = api_token;
+
   serverForm.value = server ? {
     name: server.name,
     url: server.url,
-    username: server.username,
-    api_token: '',
+    username: username,
+    api_token: api_token,
     description: server.description || '',
     is_active: server.is_active,
   } : { name: '', url: '', username: '', api_token: '', description: '', is_active: 1 };
@@ -439,22 +475,30 @@ function submitServer() {
     submitLoading.value = true;
     try {
       const payload: any = { ...serverForm.value };
-      if (payload.api_token) {
-        payload.api_token = await encryptData(payload.api_token);
-      } else if (editingServerId.value) {
+      
+      if (payload.username && payload.username.trim() !== originalUsername && payload.username.length < 100) {
+        payload.username = await encryptData(payload.username.trim());
+      } else {
+        delete payload.username;
+      }
+
+      if (payload.api_token && payload.api_token.trim() !== originalToken && payload.api_token.length < 100) {
+        payload.api_token = await encryptData(payload.api_token.trim());
+      } else {
         delete payload.api_token;
       }
+
       if (editingServerId.value) {
         await request.put(`/jenkins/servers/${editingServerId.value}`, payload);
-        message.success('实例已更新。');
+        message.success('实例已更新');
       } else {
         await request.post('/jenkins/servers', payload);
-        message.success('实例已创建。');
+        message.success('实例已创建');
       }
       serverModalVisible.value = false;
       await loadServers();
     } catch (err: any) {
-      message.error(err.message || '保存失败。');
+      message.error(err.message || '保存失败');
     } finally {
       submitLoading.value = false;
     }
@@ -471,13 +515,13 @@ async function openRunModal(job: JenkinsJob) {
     branchOptions.value = (res.data || []).map((branch: string) => ({ label: branch, value: branch }));
     runBranch.value = branchOptions.value[0]?.value || '';
   } catch (err: any) {
-    message.warning(err.message || '未获取到远程分支列表，您可以直接手动输入分支或 Tag。');
+    message.warning(err.message || '未获取到远程分支列表，您可以直接手动输入分支或 Tag');
   }
 }
 
 async function submitQuickRun() {
   if (!activeJob.value || !runBranch.value) {
-    message.error('请选择或手动输入要调度的分支/Tag。');
+    message.error('请选择或手动输入要调度的分支/Tag');
     return;
   }
   submitLoading.value = true;
@@ -487,7 +531,7 @@ async function submitQuickRun() {
       branch: runBranch.value,
       parameters: {}
     });
-    message.success(response.data.message || '构建已成功触发，正在跳转到日志页面...');
+    message.success(response.data.message || '构建已成功触发，正在跳转到日志页面');
     runModalVisible.value = false;
     await router.push({
       path: '/history',
@@ -497,7 +541,7 @@ async function submitQuickRun() {
       }
     });
   } catch (err: any) {
-    message.error(err.message || '运行失败。');
+    message.error(err.message || '运行失败');
   } finally {
     submitLoading.value = false;
   }
@@ -513,16 +557,28 @@ onMounted(loadServers);
   gap: 16px;
 }
 
-.server-card,
-.empty-server {
+.server-card {
   min-height: 152px;
-  padding: 18px;
+  padding: 18px 20px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   text-align: left;
   cursor: pointer;
-  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: var(--radius-lg, 16px);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03);
+  transition: all 0.28s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.server-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(0, 113, 227, 0.35);
+  box-shadow: 0 10px 30px rgba(0, 113, 227, 0.1);
+  background: rgba(255, 255, 255, 0.88);
 }
 
 .empty-server {

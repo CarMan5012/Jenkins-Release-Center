@@ -18,3 +18,4 @@ dist/
 docs/
 skills-lock.json
 .worktrees/
+backend/data/backups/ 

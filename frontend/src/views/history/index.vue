@@ -214,10 +214,10 @@ async function syncExternalHistories() {
     await request.post('/history/sync', null, {
       params: { job_name: queryJobName.value || undefined }
     });
-    message.success('外部手动构建同步成功！');
+    message.success('外部手动构建同步成功');
     await fetchHistories(true);
   } catch (err: any) {
-    message.error(err.message || '外部手动构建同步失败。');
+    message.error(err.message || '外部手动构建同步失败');
   } finally {
     const elapsed = Date.now() - startTime;
     if (elapsed < 500) {
@@ -250,8 +250,14 @@ async function fetchHistories(resetPage = false, trigger?: 'page' | 'header' | '
     });
     histories.value = res.data || [];
     pageCount.value = histories.value.length === limit ? page.value + 1 : page.value;
+    if (trigger === 'header') {
+      message.success('刷新成功');
+    } else if (trigger === 'query') {
+      message.success('查询成功');
+    }
   } catch (err: any) {
-    error.value = err.message || '历史记录加载失败。';
+    error.value = err.message || '历史记录加载失败';
+    message.error(err.message || '刷新失败');
   } finally {
     if (buttonLoading) {
       const elapsed = Date.now() - startTime;

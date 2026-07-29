@@ -280,3 +280,21 @@ def list_audit_logs(
     if username:
         stmt = stmt.filter(AuditLog.username.like(f"%{username}%"))
     return stmt.offset(offset).limit(limit).all()
+
+from app.core.security import decrypt_secret
+
+@router.post("/decrypt-field")
+def decrypt_field_api(
+    data: Dict[str, str],
+    current_user: User = Depends(get_current_user)
+):
+    cipher_text = data.get("text", "")
+    if not cipher_text:
+        return {"decrypted": ""}
+    if cipher_text.startswith("enc:"):
+        cipher_text = cipher_text[4:]
+    try:
+        decrypted = decrypt_secret(cipher_text)
+        return {"decrypted": decrypted}
+    except Exception:
+        return {"decrypted": cipher_text}

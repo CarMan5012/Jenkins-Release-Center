@@ -7,9 +7,9 @@
       </div>
       <div class="header-actions">
         <n-button secondary @click="router.push('/release')">返回列表</n-button>
-        <n-button secondary :disabled="!plan || plan.status === 'RUNNING'" :loading="preflightLoading" @click="preflightPlan">检测</n-button>
-        <n-button type="primary" :disabled="plan?.status === 'RUNNING' || preflightLoading || isPreflightBlocked(plan?.preflight_status)" :title="isPreflightBlocked(plan?.preflight_status) ? '请先完成并通过检测' : undefined" :loading="busyKey === 'run'" @click="triggerPlan">运行</n-button>
-        <n-button type="warning" secondary :disabled="!plan || !['WAITING', 'RUNNING'].includes(plan.status)" :loading="busyKey === 'stop'" @click="cancelPlan">停止</n-button>
+        <UiverseButton variant="cyber" size="sm" :disabled="!plan || plan.status === 'RUNNING'" :loading="preflightLoading" @click="preflightPlan">检测</UiverseButton>
+        <UiverseButton variant="primary" size="sm" :disabled="plan?.status === 'RUNNING' || preflightLoading || isPreflightBlocked(plan?.preflight_status)" :title="isPreflightBlocked(plan?.preflight_status) ? '请先完成并通过检测' : undefined" :loading="busyKey === 'run'" @click="triggerPlan">运行</UiverseButton>
+        <UiverseButton variant="danger" size="sm" :disabled="!plan || !['WAITING', 'RUNNING'].includes(plan.status)" :loading="busyKey === 'stop'" @click="cancelPlan">停止</UiverseButton>
       </div>
     </div>
 
@@ -49,6 +49,10 @@
             <n-tag size="small" :type="preflightTagType(plan.preflight_status)">{{ getPreflightMeta(plan.preflight_status).label }}</n-tag>
           </div>
         </div>
+      </div>
+
+      <div v-if="plan.status === 'RUNNING'" class="uiverse-glass" style="margin-bottom: 16px; border-radius: 12px; display: flex; align-items: center; justify-content: center;">
+        <UiverseLoader mode="ring" size="sm" text="Jenkins 发布任务调度执行中，数据实时同步..." />
       </div>
 
       <PreflightResult :result="plan.preflight_result" :checked-at="plan.preflight_checked_at" :collapsible="true" />
@@ -231,6 +235,8 @@ import LogViewer from '../../components/LogViewer.vue';
 import PreflightResult from '../../components/PreflightResult.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
+import UiverseButton from '../../components/uiverse/UiverseButton.vue';
+import UiverseLoader from '../../components/uiverse/UiverseLoader.vue';
 import request from '../../utils/request';
 import { formatDateTime, formatDuration, formatPlanType, getPlanDurationSeconds, getTaskDurationSeconds, formatTriggerBy, getPreflightMeta, isPreflightBlocked } from '../../utils/release-ui';
 import type { PreflightStatus } from '../../utils/release-ui';
@@ -357,7 +363,7 @@ async function loadPlan() {
     plan.value = res.data;
     selectedTaskId.value = orderedTasks.value[0]?.id || null;
   } catch (err: any) {
-    error.value = err.message || '发布详情加载失败。';
+    error.value = err.message || '发布详情加载失败';
   } finally {
     loading.value = false;
   }
@@ -372,8 +378,11 @@ async function loadHistory(trigger?: 'page' | 'refresh') {
   try {
     const res = await request.get('/history', { params: { page: 1, limit: 50 } });
     histories.value = res.data || [];
+    if (isManual) {
+      message.success('刷新成功');
+    }
   } catch (err: any) {
-    message.error(err.message || '历史记录加载失败。');
+    message.error(err.message || '历史记录加载失败');
   } finally {
     if (isManual) {
       const elapsed = Date.now() - startTime;
@@ -389,11 +398,11 @@ async function syncTask(taskId: number) {
   syncingTaskId.value = taskId;
   try {
     const res = await request.post(`/release/tasks/${taskId}/sync`);
-    message.success(res.data?.message || '状态同步成功。');
+    message.success(res.data?.message || '状态同步成功');
     await loadPlan();
     await loadHistory();
   } catch (err: any) {
-    message.error(err.message || '状态同步失败。');
+    message.error(err.message || '状态同步失败');
   } finally {
     syncingTaskId.value = null;
   }
@@ -406,7 +415,7 @@ async function runAction(key: string, action: () => Promise<void>) {
     await loadPlan();
     await loadHistory();
   } catch (err: any) {
-    message.error(err.message || '操作失败。');
+    message.error(err.message || '操作失败');
   } finally {
     busyKey.value = '';
   }
@@ -416,17 +425,17 @@ function triggerPlan() {
   if (!plan.value) return;
   if (preflightLoading.value) return;
   if (isPreflightBlocked(plan.value.preflight_status)) {
-    message.warning('请先完成并通过检测。');
+    message.warning('请先完成并通过检测');
     return;
   }
   const execute = () => runAction('run', async () => {
     await request.post(`/release/plans/${plan.value?.id}/trigger`);
-    message.success('已触发执行。');
+    message.success('已触发执行');
   });
   if (plan.value.preflight_status === 'WARNING') {
     dialog.warning({
       title: '检测存在警告',
-      content: `计划 [${plan.value.name}] 检测存在警告，是否现在立即运行？`,
+      content: `计划 [${plan.value.name}] 检测存在警告，是否现在立即运行`,
       positiveText: '仍然运行',
       negativeText: '取消',
       onPositiveClick: execute,
@@ -435,7 +444,7 @@ function triggerPlan() {
   }
   dialog.info({
     title: '运行确认',
-    content: `是否现在立即运行发布计划 [${plan.value.name}]？`,
+    content: `是否现在立即运行发布计划 [${plan.value.name}]`,
     positiveText: '立即运行',
     negativeText: '取消',
     onPositiveClick: execute,
@@ -448,9 +457,9 @@ async function preflightPlan() {
   try {
     const response = await request.post(`/release/plans/${plan.value?.id}/preflight`);
     plan.value = response.data;
-    message.success('检测已完成。');
+    message.success('检测已完成');
   } catch (err: any) {
-    message.error(err.message || '检测失败。');
+    message.error(err.message || '检测失败');
   } finally {
     preflightLoading.value = false;
   }
@@ -460,12 +469,12 @@ function cancelPlan() {
   if (!plan.value) return;
   dialog.warning({
     title: '停止发布任务',
-    content: `确认停止 ${plan.value.name}？`,
+    content: `确认停止 ${plan.value.name}`,
     positiveText: '停止',
     negativeText: '取消',
     onPositiveClick: () => runAction('stop', async () => {
       await request.post(`/release/plans/${plan.value?.id}/cancel`);
-      message.success('已停止。');
+      message.success('已停止');
     }),
   });
 }
@@ -473,17 +482,17 @@ function cancelPlan() {
 async function retryTask(task: ReleaseTask) {
   if (!plan.value) return;
   if (isPreflightBlocked(plan.value.preflight_status)) {
-    message.warning('请先完成并通过检测。');
+    message.warning('请先完成并通过检测');
     return;
   }
   const execute = async () => {
     retryTaskLoading.value = task.id;
     try {
       await request.post(`/release/plans/${plan.value!.id}/tasks/${task.id}/retry`);
-      message.success(`已重置并单独触发任务 [${task.job_name}] 执行。`);
+      message.success(`已重置并单独触发任务 [${task.job_name}] 执行`);
       await loadPlan();
     } catch (err: any) {
-      message.error(err.message || '任务重试失败。');
+      message.error(err.message || '任务重试失败');
     } finally {
       retryTaskLoading.value = null;
     }
@@ -492,7 +501,7 @@ async function retryTask(task: ReleaseTask) {
   if (plan.value.preflight_status === 'WARNING') {
     dialog.warning({
       title: '预检存在警告',
-      content: `预检存在警告，仍要单独重试任务 [${task.job_name}] 吗？`,
+      content: `预检存在警告，仍要单独重试任务 [${task.job_name}] 吗`,
       positiveText: '仍然重试',
       negativeText: '取消',
       onPositiveClick: execute,

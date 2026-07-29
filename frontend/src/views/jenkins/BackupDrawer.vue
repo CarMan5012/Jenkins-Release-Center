@@ -34,6 +34,9 @@
               <td class="mono">#{{ item.id }}</td>
               <td>
                 <n-tag :type="statusType(item.status)" :bordered="false" size="small">
+                  <template v-if="item.status === 'BACKUPING'" #icon>
+                    <n-spin size="small" />
+                  </template>
                   {{ statusText(item.status) }}
                 </n-tag>
               </td>
@@ -327,6 +330,7 @@ import {
   NModal,
   NPopover,
   NSkeleton,
+  NSpin,
   NTag,
   useMessage,
 } from 'naive-ui';
@@ -398,17 +402,23 @@ function clearSummary() {
   activeViewName.value = '';
 }
 
-async function fetchBackups() {
+async function fetchBackups(silent = false) {
   if (!props.server) return;
-  loading.value = true;
+  if (!silent) {
+    loading.value = true;
+  }
   error.value = '';
   try {
     const response = await request.get(`/jenkins/servers/${props.server.id}/backups`);
     backups.value = response.data || [];
   } catch (err: any) {
-    error.value = err.message || '获取备份历史失败。';
+    if (!silent) {
+      error.value = err.message || '获取备份历史失败';
+    }
   } finally {
-    loading.value = false;
+    if (!silent) {
+      loading.value = false;
+    }
   }
 }
 
@@ -417,18 +427,18 @@ async function triggerNewBackup() {
   backingUp.value = true;
   try {
     await request.post(`/jenkins/servers/${props.server.id}/backups`);
-    message.success('备份任务已提交后台执行，请稍后刷新列表。');
+    message.success('备份任务已提交后台执行，请稍后刷新列表');
     await fetchBackups();
     let count = 0;
     const interval = window.setInterval(async () => {
-      await fetchBackups();
+      await fetchBackups(true);
       count++;
       if (!backups.value.some((backup) => backup.status === 'BACKUPING') || count > 15) {
         window.clearInterval(interval);
       }
     }, 2000);
   } catch (err: any) {
-    message.error(err.message || '触发备份失败。');
+    message.error(err.message || '触发备份失败');
   } finally {
     backingUp.value = false;
   }
@@ -458,7 +468,7 @@ async function showSummary(backupId: number) {
     }
   } catch (err: any) {
     if (requestId !== summaryRequestId) return;
-    message.error(err.message || '获取报告失败，仅管理员可查看包含明文凭据的备份。');
+    message.error(err.message || '获取报告失败，仅管理员可查看包含明文凭据的备份');
     summaryVisible.value = false;
   } finally {
     if (requestId === summaryRequestId) summaryLoading.value = false;
@@ -479,7 +489,7 @@ async function downloadZip(backupId: number) {
     anchor.click();
     URL.revokeObjectURL(url);
   } catch (err: any) {
-    message.error(err.message || '下载失败，仅管理员可下载包含明文凭据的备份。');
+    message.error(err.message || '下载失败，仅管理员可下载包含明文凭据的备份');
   }
 }
 

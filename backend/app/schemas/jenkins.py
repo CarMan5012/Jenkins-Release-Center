@@ -1,7 +1,7 @@
 from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from datetime import datetime
-from app.core.security import rsa_decrypt
+from app.core.security import rsa_decrypt, decrypt_secret
 
 class JenkinsServerBase(BaseModel):
     name: str
@@ -12,6 +12,16 @@ class JenkinsServerBase(BaseModel):
 
 class JenkinsServerCreate(JenkinsServerBase):
     api_token: str
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def decrypt_username(cls, v: str) -> str:
+        if v and len(v) > 100:
+            try:
+                return rsa_decrypt(v)
+            except Exception:
+                pass
+        return v
 
     @field_validator("api_token", mode="before")
     @classmethod
@@ -31,6 +41,16 @@ class JenkinsServerUpdate(BaseModel):
     description: Optional[str] = None
     is_active: Optional[int] = None
 
+    @field_validator("username", mode="before")
+    @classmethod
+    def decrypt_username(cls, v: Optional[str]) -> Optional[str]:
+        if v and len(v) > 100:
+            try:
+                return rsa_decrypt(v)
+            except Exception:
+                pass
+        return v
+
     @field_validator("api_token", mode="before")
     @classmethod
     def decrypt_api_token(cls, v: Optional[str]) -> Optional[str]:
@@ -43,8 +63,27 @@ class JenkinsServerUpdate(BaseModel):
 
 class JenkinsServerResponse(JenkinsServerBase):
     id: int
+    api_token: str
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def format_encrypted_username(cls, v: str) -> str:
+        if v:
+            if not v.startswith("enc:"):
+                return f"enc:{v}"
+            return v
+        return ""
+
+    @field_validator("api_token", mode="before")
+    @classmethod
+    def format_encrypted_api_token(cls, v: str) -> str:
+        if v:
+            if not v.startswith("enc:"):
+                return f"enc:{v}"
+            return v
+        return ""
 
     class Config:
         from_attributes = True

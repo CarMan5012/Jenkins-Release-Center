@@ -1,0 +1,287 @@
+<style>
+  #login-directions {
+    color-scheme: light dark;
+  }
+  #login-directions .direction-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 20px;
+  }
+  #login-directions .direction {
+    cursor: pointer;
+  }
+  #login-directions .preview {
+    min-height: 410px;
+    overflow: hidden;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--background);
+  }
+  #login-directions .split-preview {
+    display: grid;
+    grid-template-columns: 1.05fr .95fr;
+    height: 410px;
+  }
+  #login-directions .brand-side {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 28px;
+    background: light-dark(#13243a, #101d2d);
+    color: #f3f7fb;
+  }
+  #login-directions .brand-lockup,
+  #login-directions .form-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  #login-directions .mark {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    border-radius: 9px;
+    background: light-dark(#d94841, #e05a53);
+    color: #fff;
+    font-weight: 500;
+  }
+  #login-directions .brand-name {
+    font-weight: 500;
+  }
+  #login-directions .brand-message {
+    max-width: 16ch;
+    margin: 0;
+    font-size: 28px;
+    line-height: 1.12;
+    letter-spacing: -.04em;
+  }
+  #login-directions .brand-note {
+    color: #aebed0;
+    font-size: 12px;
+  }
+  #login-directions .form-side,
+  #login-directions .single-form,
+  #login-directions .dark-form {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 30px;
+  }
+  #login-directions .form-side {
+    background: light-dark(#f8fafc, #182334);
+    color: light-dark(#172033, #edf3fa);
+  }
+  #login-directions .form-copy {
+    margin: 14px 0 22px;
+  }
+  #login-directions .form-copy strong {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 20px;
+    letter-spacing: -.025em;
+  }
+  #login-directions .form-copy span,
+  #login-directions .option-note {
+    color: var(--muted-foreground);
+    font-size: 12px;
+  }
+  #login-directions .field {
+    margin-bottom: 14px;
+  }
+  #login-directions .field label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  #login-directions .field-box {
+    height: 40px;
+    border: 1px solid light-dark(#cfd7e2, #3a4a5f);
+    border-radius: 9px;
+    background: light-dark(#fff, #131d2b);
+  }
+  #login-directions .login-action {
+    display: grid;
+    height: 40px;
+    place-items: center;
+    margin-top: 4px;
+    border-radius: 9px;
+    background: light-dark(#1768c4, #4792e6);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  #login-directions .single-preview {
+    display: grid;
+    place-items: center;
+    height: 410px;
+    padding: 34px;
+    background:
+      radial-gradient(circle at 18% 12%, color-mix(in srgb, var(--primary) 18%, transparent), transparent 38%),
+      light-dark(#eef3f8, #111b29);
+  }
+  #login-directions .single-form {
+    width: min(100%, 292px);
+    padding: 28px;
+    border: 1px solid light-dark(#dbe2eb, #314155);
+    border-radius: 16px;
+    background: light-dark(#fff, #182435);
+    box-shadow: 0 18px 46px color-mix(in srgb, var(--foreground) 10%, transparent);
+    color: light-dark(#172033, #edf3fa);
+  }
+  #login-directions .single-form .form-brand {
+    justify-content: center;
+    margin-bottom: 8px;
+  }
+  #login-directions .single-form .form-copy {
+    text-align: center;
+  }
+  #login-directions .control-preview {
+    height: 410px;
+    padding: 22px;
+    background: light-dark(#101820, #0c1219);
+    color: #eef4fa;
+  }
+  #login-directions .control-frame {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    height: 100%;
+    border: 1px solid #2d3d4a;
+    border-radius: 12px;
+    background: #131f29;
+  }
+  #login-directions .control-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #2d3d4a;
+  }
+  #login-directions .control-main {
+    display: grid;
+    grid-template-columns: .85fr 1.15fr;
+  }
+  #login-directions .control-message {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 22px;
+    border-right: 1px solid #2d3d4a;
+  }
+  #login-directions .control-message strong {
+    font-size: 23px;
+    line-height: 1.1;
+    letter-spacing: -.035em;
+  }
+  #login-directions .control-message span {
+    margin-top: 10px;
+    color: #91a6b8;
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+  }
+  #login-directions .dark-form {
+    color: #eef4fa;
+  }
+  #login-directions .dark-form .field-box {
+    border-color: #3a4d5d;
+    background: #0d171f;
+  }
+  #login-directions .choice-meta {
+    padding-top: 14px;
+  }
+  #login-directions .choice-meta h3 {
+    margin: 0 0 6px;
+  }
+  #login-directions .choice-meta p {
+    margin: 0;
+    color: var(--muted-foreground);
+  }
+  @media (max-width: 980px) {
+    #login-directions .direction-grid {
+      grid-template-columns: 1fr;
+    }
+    #login-directions .preview {
+      min-height: 360px;
+    }
+  }
+  @media (max-width: 520px) {
+    #login-directions .split-preview,
+    #login-directions .control-main {
+      grid-template-columns: 1fr;
+    }
+    #login-directions .brand-side,
+    #login-directions .control-message {
+      display: none;
+    }
+  }
+</style>
+
+<div id="login-directions">
+  <h2>登录页更适合哪种气质？</h2>
+  <p class="subtitle">三种方案都保留 Jenkins 品牌、现有字段顺序和登录逻辑。点击卡片选择你更喜欢的方向。</p>
+
+  <div class="direction-grid cards">
+    <div class="card direction" data-choice="calm-split" onclick="toggleSelect(this)">
+      <div class="preview split-preview">
+        <section class="brand-side">
+          <div class="brand-lockup">
+            <div class="mark">J</div>
+            <span class="brand-name">Jenkins Release Center</span>
+          </div>
+          <p class="brand-message">让每一次发布都清晰、可控。</p>
+          <span class="brand-note">发布计划 · 任务状态 · 配置备份</span>
+        </section>
+        <section class="form-side">
+          <div class="form-brand"><div class="mark">J</div><span class="brand-name">欢迎回来</span></div>
+          <div class="form-copy"><strong>登录控制台</strong><span>使用内部账号继续</span></div>
+          <div class="field"><label>用户名</label><div class="field-box"></div></div>
+          <div class="field"><label>密码</label><div class="field-box"></div></div>
+          <div class="login-action">登录</div>
+        </section>
+      </div>
+      <div class="choice-meta card-body">
+        <h3>A. 冷静分屏</h3>
+        <p>品牌感更强，登录区域仍然克制。推荐。</p>
+      </div>
+    </div>
+
+    <div class="card direction" data-choice="quiet-focus" onclick="toggleSelect(this)">
+      <div class="preview single-preview">
+        <section class="single-form">
+          <div class="form-brand"><div class="mark">J</div><span class="brand-name">Jenkins</span></div>
+          <div class="form-copy"><strong>发布调度中心</strong><span>登录后管理发布流程</span></div>
+          <div class="field"><label>用户名</label><div class="field-box"></div></div>
+          <div class="field"><label>密码</label><div class="field-box"></div></div>
+          <div class="login-action">登录</div>
+        </section>
+      </div>
+      <div class="choice-meta card-body">
+        <h3>B. 安静聚焦</h3>
+        <p>最小改动，精修间距、层次和移动端。</p>
+      </div>
+    </div>
+
+    <div class="card direction" data-choice="control-room" onclick="toggleSelect(this)">
+      <div class="preview control-preview">
+        <section class="control-frame">
+          <div class="control-top"><div class="brand-lockup"><div class="mark">J</div><span class="brand-name">Release Center</span></div><span class="option-note">Internal Access</span></div>
+          <div class="control-main">
+            <div class="control-message"><strong>准备好<br>下一次发布</strong><span>JENKINS OPERATIONS</span></div>
+            <div class="dark-form">
+              <div class="form-copy"><strong>身份验证</strong><span>请输入内部账号凭据</span></div>
+              <div class="field"><label>用户名</label><div class="field-box"></div></div>
+              <div class="field"><label>密码</label><div class="field-box"></div></div>
+              <div class="login-action">进入控制台</div>
+            </div>
+          </div>
+        </section>
+      </div>
+      <div class="choice-meta card-body">
+        <h3>C. 深色控制室</h3>
+        <p>技术感最强，但与现有浅色后台差异更大。</p>
+      </div>
+    </div>
+  </div>
+</div>

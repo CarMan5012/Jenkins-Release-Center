@@ -75,6 +75,7 @@ def read_backup_details(zip_path):
 def create_server(
     request: Request,
     server: JenkinsServerCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_operator)
 ):
@@ -91,10 +92,11 @@ def create_server(
         raise HTTPException(status_code=400, detail=str(e))
 
     encrypted_token = encrypt_secret(server.api_token)
+    encrypted_username = encrypt_secret(server.username)
     db_server = JenkinsServer(
         name=server.name,
         url=server.url,
-        username=server.username,
+        username=encrypted_username,
         api_token=encrypted_token,
         description=server.description,
         is_active=server.is_active
@@ -103,6 +105,21 @@ def create_server(
     db.commit()
     db.refresh(db_server)
     log_action(db, current_user, "CREATE_JENKINS_SERVER", get_client_ip(request), f"Created Jenkins Server {server.name}")
+    
+    # 自动触发后台同步任务（仅在启用状态下）
+    if db_server.is_active:
+        syncing_servers.add(db_server.id)
+        def run_sync_and_cleanup(sid: int):
+            try:
+                sync_jenkins_data(sid)
+            except Exception as e:
+                import loguru
+                loguru.logger.error(f"Background sync failed for newly created server {sid}: {str(e)}")
+            finally:
+                syncing_servers.discard(sid)
+                
+        background_tasks.add_task(run_sync_and_cleanup, db_server.id)
+    
     return db_server
 
 @router.get("/servers", response_model=List[JenkinsServerResponse])
@@ -152,11 +169,20 @@ def update_server(
         old_origin = f"{old_parsed.scheme}://{old_parsed.netloc}"
         new_origin = f"{new_parsed.scheme}://{new_parsed.netloc}"
         if new_origin != old_origin:
-            if "api_token" not in update_data or not update_data["api_token"]:
+            if "api_token" not in update_data or not update_data["api_token"] or update_data["api_token"] in ["********", "••••••••"]:
                 raise HTTPException(status_code=400, detail="修改 Jenkins origin 时必须重新提交 Token")
                 
+    if "username" in update_data:
+        if update_data["username"] and not update_data["username"].startswith("enc:"):
+            update_data["username"] = encrypt_secret(update_data["username"])
+        elif update_data["username"] and update_data["username"].startswith("enc:"):
+            del update_data["username"]
+            
     if "api_token" in update_data:
-        update_data["api_token"] = encrypt_secret(update_data["api_token"])
+        if not update_data["api_token"] or update_data["api_token"] in ["********", "••••••••"]:
+            del update_data["api_token"]
+        else:
+            update_data["api_token"] = encrypt_secret(update_data["api_token"])
         
     for field, value in update_data.items():
         setattr(server, field, value)
@@ -176,10 +202,34 @@ def delete_server(
     server = db.get(JenkinsServer, server_id)
     if not server:
         raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例")
-    db.delete(server)
-    db.commit()
-    log_action(db, current_user, "DELETE_JENKINS_SERVER", get_client_ip(request), f"Deleted Jenkins Server {server.name}")
-    return {"success": True, "message": "Jenkins 实例已成功删除"}
+    
+    # 强制级联删除所有关联的发布计划、任务和历史记录
+    from app.models.release import ReleasePlan, ReleaseTask, ReleaseHistory
+    
+    # 查找所有与该实例相关的发布计划 ID
+    tasks = db.query(ReleaseTask.plan_id).filter(ReleaseTask.server_id == server_id).distinct().all()
+    plan_ids = [t[0] for t in tasks]
+    
+    try:
+        if plan_ids:
+            # 删除相关的历史记录
+            db.query(ReleaseHistory).filter(ReleaseHistory.plan_id.in_(plan_ids)).delete(synchronize_session=False)
+            # 删除相关的任务
+            db.query(ReleaseTask).filter(ReleaseTask.plan_id.in_(plan_ids)).delete(synchronize_session=False)
+            # 删除相关的计划本身
+            db.query(ReleasePlan).filter(ReleasePlan.id.in_(plan_ids)).delete(synchronize_session=False)
+            
+        # 删除任何其他仅仅关联该 server_id 的孤立历史记录（虽然通常有 plan_id）
+        db.query(ReleaseHistory).filter(ReleaseHistory.server_id == server_id).delete(synchronize_session=False)
+        
+        db.delete(server)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"强制删除失败：{str(e)}")
+        
+    log_action(db, current_user, "DELETE_JENKINS_SERVER", get_client_ip(request), f"Deleted Jenkins Server {server.name} and all its dependencies")
+    return {"success": True, "message": "Jenkins 实例及相关的所有发布数据已强制删除"}
 
 @router.post("/servers/{server_id}/test")
 def test_server_connection(

@@ -12,7 +12,7 @@
         <section class="panel">
           <div class="panel__header">
             <h2 class="panel__title">通知渠道</h2>
-            <n-button size="small" type="primary" @click="openNotifyModal()">添加渠道</n-button>
+            <UiverseButton variant="primary" size="sm" @click="openNotifyModal()">添加渠道</UiverseButton>
           </div>
           <n-alert v-if="notifyError" type="error" :bordered="false" class="tab-alert">{{ notifyError }}</n-alert>
           <div v-if="notifyLoading" class="skeleton-block"><n-skeleton text :repeat="6" /></div>
@@ -223,9 +223,9 @@
                 </div>
               </n-form-item>
               <div style="margin-top: 10px; display: flex; justify-content: flex-start;">
-                <n-button type="primary" size="small" :loading="submitRetentionLoading" @click="submitRetentionPolicy">
+                <UiverseButton variant="primary" size="sm" :loading="submitRetentionLoading" @click="submitRetentionPolicy">
                   保存策略
-                </n-button>
+                </UiverseButton>
               </div>
             </n-form>
 
@@ -257,7 +257,14 @@
         <n-form-item label="Webhook" path="webhook_url">
           <n-input v-model:value="notifyForm.webhook_url" type="password" show-password-on="click" />
         </n-form-item>
-        <n-form-item label="Secret"><n-input v-model:value="notifyForm.secret" type="password" show-password-on="click" /></n-form-item>
+        <n-form-item label="Secret">
+          <n-input
+            v-model:value="notifyForm.secret"
+            type="password"
+            show-password-on="click"
+            :placeholder="editingNotifyId ? '留空保持不变' : '请输入 Secret'"
+          />
+        </n-form-item>
         <n-form-item v-if="notifyForm.channel_type === 'DINGTALK'" label="关键词">
           <n-input v-model:value="notifyForm.keyword" placeholder="钉钉自定义安全关键词" />
         </n-form-item>
@@ -308,6 +315,7 @@ import {
 import type { FormInst, FormRules } from 'naive-ui';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
+import UiverseButton from '../../components/uiverse/UiverseButton.vue';
 import request from '../../utils/request';
 import { encryptData } from '../../utils/crypto';
 import { formatDateTime } from '../../utils/release-ui';
@@ -390,7 +398,7 @@ async function loadNotifyConfigs() {
     const res = await request.get('/system/notify-configs');
     notifyConfigs.value = res.data || [];
   } catch (err: any) {
-    notifyError.value = err.message || '通知配置加载失败。';
+    notifyError.value = err.message || '通知配置加载失败';
   } finally {
     notifyLoading.value = false;
   }
@@ -410,8 +418,12 @@ async function loadAuditLogs(resetPage = false) {
       },
     });
     auditLogs.value = res.data || [];
+    if (resetPage) {
+      message.success('查询成功');
+    }
   } catch (err: any) {
-    auditError.value = err.message || '审计日志加载失败。';
+    auditError.value = err.message || '审计日志加载失败';
+    message.error(err.message || '查询失败');
   } finally {
     if (resetPage) {
       const remaining = 500 - (Date.now() - startedAt);
@@ -427,7 +439,7 @@ function openNotifyModal(item?: NotifyConfig) {
     name: item.name,
     channel_type: item.channel_type,
     webhook_url: item.webhook_url,
-    secret: item.secret || '',
+    secret: '',
     keyword: item.keyword || '',
     is_active: item.is_active,
     trigger_events: [...item.trigger_events],
@@ -449,8 +461,10 @@ function submitNotify() {
     submitLoading.value = true;
     try {
       const payload = { ...notifyForm.value };
-      if (payload.secret) {
-        payload.secret = await encryptData(payload.secret);
+      if (payload.secret && payload.secret.trim() !== '') {
+        payload.secret = await encryptData(payload.secret.trim());
+      } else if (editingNotifyId.value) {
+        delete (payload as any).secret;
       }
       if (payload.webhook_url) {
         payload.webhook_url = await encryptData(payload.webhook_url);
@@ -516,17 +530,17 @@ function maskWebhook(url: string): string {
 function deleteNotify(item: NotifyConfig) {
   dialog.error({
     title: '删除通知渠道',
-    content: `确认删除 ${item.name}？`,
+    content: `确认删除 ${item.name}`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
       busyKey.value = `delete-${item.id}`;
       try {
         await request.delete(`/system/notify-configs/${item.id}`);
-        message.success('已删除。');
+        message.success('已删除');
         await loadNotifyConfigs();
       } catch (err: any) {
-        message.error(err.message || '删除失败。');
+        message.error(err.message || '删除失败');
       } finally {
         busyKey.value = '';
       }
@@ -597,17 +611,17 @@ const resetSeqLoading = ref(false);
 
 function confirmResetSequence() {
   dialog.warning({
-    title: '确认重置历史记录 ID 序号？',
-    content: '此操作将清空当前的发布历史与外部构建记录，并重置数据库计数器。重置后，系统产生的新构建记录将重新从 ID #1 开始计算。确定要继续吗？',
+    title: '确认重置历史记录 ID 序号',
+    content: '此操作将清空当前的发布历史与外部构建记录，并重置数据库计数器，重置后系统产生的新构建记录将重新从 ID #1 开始计算',
     positiveText: '确认重置归零',
     negativeText: '取消',
     onPositiveClick: async () => {
       resetSeqLoading.value = true;
       try {
         const res = await request.post('/history/reset-sequence');
-        message.success(res.data?.message || '历史记录 ID 已重置，从 #1 重新开始计算！');
+        message.success(res.data?.message || '历史记录 ID 已重置，从 #1 重新开始计算');
       } catch (err: any) {
-        message.error(err.message || '重置历史记录 ID 失败。');
+        message.error(err.message || '重置历史记录 ID 失败');
       } finally {
         resetSeqLoading.value = false;
       }
