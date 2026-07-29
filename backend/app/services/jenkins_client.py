@@ -283,11 +283,15 @@ class JenkinsClient:
         response = self.session.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
+            is_building = data.get("building", False)
+            raw_duration = data.get("duration", 0) or 0
+            # 当构建还在进行中 (is_building=True) 时，Jenkins API 可能会返回 estimatedDuration，不能用作当前完成耗时
+            duration_sec = 0 if is_building else (raw_duration // 1000)
             return {
-                "building": data.get("building", False),
+                "building": is_building,
                 "result": data.get("result"), # SUCCESS, FAILURE, ABORTED, etc.
                 "timestamp": data.get("timestamp"), # Epoch ms
-                "duration": data.get("duration", 0) // 1000, # seconds
+                "duration": duration_sec, # seconds
                 "url": data.get("url"),
                 "queue_id": data.get("queueId")
             }

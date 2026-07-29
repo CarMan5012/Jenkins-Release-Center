@@ -39,54 +39,92 @@
       </div>
 
       <div v-else class="table-wrap">
-        <table class="ops-table">
+        <table class="ops-table clean-table">
           <thead>
             <tr>
-              <th scope="col">名称</th>
-              <th scope="col">状态</th>
-              <th scope="col">最近运行</th>
-              <th scope="col">星期</th>
-              <th scope="col">耗时</th>
-              <th scope="col">负责人/来源</th>
-              <th scope="col">操作</th>
+              <th scope="col" style="width: 16%">任务名称</th>
+              <th scope="col" style="width: 15%">Job 名称</th>
+              <th scope="col" style="width: 12%">状态</th>
+              <th scope="col" style="width: 12%">预检校验</th>
+              <th scope="col" style="width: 15%">创建时间</th>
+              <th scope="col" style="width: 14%">最近运行</th>
+              <th scope="col" style="width: 8%">星期</th>
+              <th scope="col" style="width: 8%; text-align: right">操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="plan in visiblePlans" :key="plan.id">
               <td>
-                <RouterLink class="cell-title" :to="`/release/${plan.id}`">
+                <RouterLink class="task-name-link" :to="`/release/${plan.id}`">
                   <strong>{{ plan.name }}</strong>
                 </RouterLink>
               </td>
               <td>
+                <n-tooltip v-if="plan.tasks && plan.tasks.length" trigger="hover" placement="top-start" :raw="true">
+                  <template #trigger>
+                    <div class="job-cell-trigger">
+                      <span class="mono job-first-name">{{ plan.tasks[0].job_name }}</span>
+                      <n-tag v-if="plan.tasks.length > 1" size="tiny" type="info" round :bordered="false" class="job-count-badge">
+                        共{{ plan.tasks.length }}个
+                      </n-tag>
+                    </div>
+                  </template>
+                  <div class="job-tooltip-card">
+                    <div class="tooltip-header">关联的 Job 清单 (共 {{ plan.tasks.length }} 个)</div>
+                    <ul class="tooltip-job-list">
+                      <li v-for="(task, idx) in plan.tasks" :key="task.id || idx">
+                        <span class="job-seq">#{{ idx + 1 }}</span>
+                        <span class="job-name mono">{{ task.job_name }}</span>
+                      </li>
+                    </ul>
+                  </div>
+                </n-tooltip>
+                <span v-else class="muted mono" style="font-size: 11.5px">未绑定 Job</span>
+              </td>
+              <td>
+                <StatusBadge :status="plan.status" />
+              </td>
+              <td>
+                <n-tag size="small" round :bordered="false" :type="preflightTagType(plan.preflight_status)">
+                  {{ getPreflightMeta(plan.preflight_status).label }}
+                </n-tag>
+              </td>
+              <td class="mono muted" style="font-size: 12px">
+                {{ formatDateTime(plan.created_at) }}
+              </td>
+              <td>
                 <div class="cell-title">
-                  <StatusBadge :status="plan.status" />
-                  <span>
-                    <n-tag size="small" :type="preflightTagType(plan.preflight_status)">{{ getPreflightMeta(plan.preflight_status).label }}</n-tag>
+                  <span class="mono time-text">
+                    {{ plan.execute_time ? formatDateTime(plan.execute_time) : '-' }}
+                  </span>
+                  <span class="mono muted duration-text" v-if="plan.execute_time || Boolean(getPlanDurationSeconds(plan))">
+                    耗时 {{ formatDuration(getPlanDurationSeconds(plan) || 0) }}
                   </span>
                 </div>
               </td>
-              <td class="mono">{{ formatDateTime(plan.execute_time || plan.created_at) }}</td>
-              <td class="mono">{{ getWeekDay(plan.execute_time || plan.created_at) }}</td>
-              <td class="mono">{{ formatDuration(getPlanDurationSeconds(plan)) }}</td>
               <td>
-                <div class="cell-title">
-                  <strong>creator #{{ plan.creator_id }}</strong>
-                  <span class="muted">{{ plan.tasks?.[0]?.job_name || 'Jenkins' }}</span>
-                </div>
+                <span class="mono muted week-chip-standalone">
+                  {{ getWeekDay(plan.execute_time || plan.created_at) }}
+                </span>
               </td>
-              <td>
-                <div class="cell-actions">
-                  <n-button size="tiny" type="primary" :loading="busyKey === `run-${plan.id}`" :disabled="plan.status !== 'WAITING' || isPreflightBlocked(plan.preflight_status)" :title="isPreflightBlocked(plan.preflight_status) ? '请先完成并通过检测' : undefined" @click="triggerPlan(plan)">运行</n-button>
-                  <n-button size="tiny" type="warning" secondary :loading="busyKey === `stop-${plan.id}`" :disabled="!['WAITING', 'RUNNING'].includes(plan.status)" @click="cancelPlan(plan)">停止</n-button>
-                  <n-button size="tiny" secondary :disabled="plan.status !== 'WAITING'" @click="editPlan(plan)">编辑</n-button>
-                  <n-button size="tiny" secondary :disabled="!plan.tasks?.length" @click="openLogs(plan)">日志</n-button>
-                  <n-button size="tiny" type="error" secondary :loading="busyKey === `delete-${plan.id}`" :disabled="plan.status === 'RUNNING'" @click="deletePlan(plan)">删除</n-button>
+              <td style="text-align: right">
+                <div class="action-cell">
+                  <!-- 次要操作下拉菜单 (已移除“运行”按钮) -->
+                  <n-dropdown
+                    v-if="getActionOptions(plan).length"
+                    trigger="click"
+                    :options="getActionOptions(plan)"
+                    @select="(key) => handleSelectAction(key, plan)"
+                  >
+                    <n-button size="tiny" secondary circle aria-label="操作菜单">
+                      <template #icon><n-icon :component="EllipsisHorizontalOutline" /></template>
+                    </n-button>
+                  </n-dropdown>
                 </div>
               </td>
             </tr>
             <tr v-if="!visiblePlans.length">
-              <td colspan="7"><div class="empty-inline">没有匹配的发布任务。</div></td>
+              <td colspan="8"><div class="empty-inline">没有匹配的发布任务。</div></td>
             </tr>
           </tbody>
         </table>
@@ -139,9 +177,30 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, h, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { NAlert, NButton, NInput, NModal, NSelect, NSkeleton, NTag, useDialog, useMessage } from 'naive-ui';
+import {
+  NAlert,
+  NButton,
+  NDropdown,
+  NIcon,
+  NInput,
+  NModal,
+  NSelect,
+  NSkeleton,
+  NTag,
+  NTooltip,
+  useDialog,
+  useMessage,
+} from 'naive-ui';
+import {
+  PlayOutline,
+  StopOutline,
+  EllipsisHorizontalOutline,
+  DocumentTextOutline,
+  CreateOutline,
+  TrashOutline,
+} from '@vicons/ionicons5';
 import LogViewer from '../../components/LogViewer.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
@@ -387,6 +446,58 @@ function openLogs(plan: ReleasePlan) {
   logModalVisible.value = Boolean(activeTask.value);
 }
 
+function renderIcon(icon: any) {
+  return () => h(NIcon, null, { default: () => h(icon) });
+}
+
+function getActionOptions(plan: ReleasePlan) {
+  const options = [];
+  if (plan.status === 'WAITING' && !isPreflightBlocked(plan.preflight_status)) {
+    options.push({
+      label: '运行任务',
+      key: 'run',
+      icon: renderIcon(PlayOutline),
+    });
+  }
+  if (plan.tasks?.length) {
+    options.push({
+      label: '查看日志',
+      key: 'log',
+      icon: renderIcon(DocumentTextOutline),
+    });
+  }
+  if (plan.status === 'RUNNING') {
+    options.push({
+      label: '停止任务',
+      key: 'stop',
+      icon: renderIcon(StopOutline),
+    });
+  }
+  if (plan.status === 'WAITING') {
+    options.push({
+      label: '编辑计划',
+      key: 'edit',
+      icon: renderIcon(CreateOutline),
+    });
+  }
+  if (plan.status !== 'RUNNING') {
+    options.push({
+      label: '删除计划',
+      key: 'delete',
+      icon: renderIcon(TrashOutline),
+    });
+  }
+  return options;
+}
+
+function handleSelectAction(key: string, plan: ReleasePlan) {
+  if (key === 'run') triggerPlan(plan);
+  else if (key === 'log') openLogs(plan);
+  else if (key === 'stop') cancelPlan(plan);
+  else if (key === 'edit') editPlan(plan);
+  else if (key === 'delete') deletePlan(plan);
+}
+
 let pollTimer: any = null;
 
 onMounted(() => {
@@ -501,5 +612,140 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 4px;
   text-align: right;
+}
+
+.clean-table th,
+.clean-table td {
+  padding: 13px 16px;
+}
+
+.task-name-link {
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.sub-job-name {
+  font-size: 11.5px;
+}
+
+.status-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.time-text {
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.week-chip {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.duration-text {
+  font-size: 11.5px;
+}
+
+.creator-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--surface-subtle);
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.action-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.job-cell-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 160px;
+  cursor: pointer;
+}
+
+.job-first-name {
+  font-size: 11.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-count-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 4px;
+  height: 15px;
+  line-height: 15px;
+  flex-shrink: 0;
+}
+
+.job-tooltip-card {
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.04);
+  padding: 12px 14px;
+  min-width: 190px;
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+.tooltip-header {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
+  padding-bottom: 6px;
+  letter-spacing: -0.01em;
+}
+
+.tooltip-job-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tooltip-job-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.job-seq {
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--primary-soft);
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.week-chip-standalone {
+  display: inline-block;
+  padding: 2px 6px;
+  background: var(--surface-subtle);
+  border-radius: 5px;
+  font-size: 11.5px;
+  color: var(--text-muted);
 }
 </style>

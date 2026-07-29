@@ -295,6 +295,7 @@ def create_plan(
         execute_time=execute_time,
         interval_minutes=plan_in.interval_minutes,
         pipeline_failure_strategy=plan_in.pipeline_failure_strategy,
+        notify_dingtalk=plan_in.notify_dingtalk,
         status="WAITING",
         creator_id=current_user.id,
         idempotency_key=idem_key
@@ -796,6 +797,7 @@ def update_plan(
     plan.execute_time = execute_time
     plan.interval_minutes = plan_in.interval_minutes
     plan.pipeline_failure_strategy = plan_in.pipeline_failure_strategy
+    plan.notify_dingtalk = plan_in.notify_dingtalk
     plan.updated_at = datetime.now()
     
     # 7. Create new tasks

@@ -148,6 +148,8 @@ def sync_external_history(
 
 from sqlalchemy import text
 
+from app.models.system import AuditLog
+
 @router.post("/reset-sequence")
 def reset_history_sequence(
     db: Session = Depends(get_db),
@@ -158,10 +160,44 @@ def reset_history_sequence(
     """
     try:
         db.query(ReleaseHistory).delete()
-        try:
-            db.execute(text("DELETE FROM sqlite_sequence WHERE name='release_history'"))
-        except Exception:
-            pass
+        db.flush()
+        
+        # 多数据库方言支持，彻底归零重置自增主键 ID
+        bind = db.get_bind()
+        dialect_name = bind.dialect.name.lower() if bind and hasattr(bind, "dialect") else ""
+        
+        if "sqlite" in dialect_name:
+            try:
+                db.execute(text("DELETE FROM sqlite_sequence WHERE name='release_history'"))
+            except Exception:
+                # sqlite_sequence 系统表仅在 SQLite 产生 AUTOINCREMENT 时建立，若不存在则后续新增默认从 #1 开始，忽略即可
+                pass
+        elif "mysql" in dialect_name:
+            db.execute(text("ALTER TABLE release_history AUTO_INCREMENT = 1"))
+        elif "postgresql" in dialect_name or "postgres" in dialect_name:
+            db.execute(text("ALTER SEQUENCE release_history_id_seq RESTART WITH 1"))
+        else:
+            try:
+                db.execute(text("DELETE FROM sqlite_sequence WHERE name='release_history'"))
+            except Exception:
+                pass
+            try:
+                db.execute(text("ALTER TABLE release_history AUTO_INCREMENT = 1"))
+            except Exception:
+                pass
+
+        # 提取用户名字符串与用户 ID
+        username_str = getattr(current_user, "username", str(current_user))
+        user_id_val = getattr(current_user, "id", None)
+
+        # 写入安全审计日志
+        db.add(AuditLog(
+            user_id=user_id_val,
+            username=username_str,
+            action="RESET_HISTORY_SEQUENCE",
+            details="清空所有构建发布历史记录并重置自增主键 ID 序号归零从 #1 开始"
+        ))
+        
         db.commit()
         return {"success": True, "message": "历史记录 ID 序号已成功重置，后续新增记录将从 #1 开始计算"}
     except Exception as e:

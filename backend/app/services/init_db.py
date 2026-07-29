@@ -17,6 +17,7 @@ def ensure_release_plan_preflight_columns(engine) -> None:
         "preflight_revision": "INTEGER NOT NULL DEFAULT 0",
         "preflight_checked_at": "DATETIME NULL",
         "preflight_result": "JSON NULL",
+        "notify_dingtalk": "BOOLEAN NOT NULL DEFAULT 0",
     }
     with engine.begin() as connection:
         for name, definition in definitions.items():

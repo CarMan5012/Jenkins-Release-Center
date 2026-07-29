@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any, Optional
-from sqlalchemy import String, Integer, DateTime, Text, ForeignKey, JSON, UniqueConstraint
+from sqlalchemy import String, Integer, DateTime, Text, ForeignKey, JSON, UniqueConstraint, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -22,6 +22,7 @@ class ReleasePlan(Base):
     preflight_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     preflight_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     preflight_result: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    notify_dingtalk: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, insert_default=False)
 
     creator: Mapped["User"] = relationship("User")
     tasks: Mapped[list["ReleaseTask"]] = relationship("ReleaseTask", back_populates="plan", cascade="all, delete-orphan")

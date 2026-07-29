@@ -91,25 +91,139 @@
           <div class="panel__header">
             <h2 class="panel__title">数据保留策略</h2>
           </div>
-          <div style="padding: 24px 28px; max-width: 620px;">
-            <n-form label-placement="left" label-width="180">
-              <n-form-item label="安全审计日志保留" feedback="设定安全审计日志的最大保留天数。设为 0 或留空则永久保留。">
-                <n-input-number v-model:value="auditRetention" :min="0" placeholder="默认 30 天，0 表示永久">
-                  <template #suffix>天</template>
-                </n-input-number>
+          <div style="padding: 20px 24px; max-width: 440px;">
+            <n-form label-placement="left" label-width="170" size="small" :show-feedback="false" style="display: grid; gap: 8px;">
+              <n-form-item>
+                <template #label>
+                  <span style="white-space: nowrap; display: inline-flex; align-items: center;">
+                    <span>安全审计日志保留</span>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <span class="help-icon">?</span>
+                      </template>
+                      <span>设定安全审计日志的最大保留天数。设为 0 或留空则永久保留。</span>
+                    </n-tooltip>
+                  </span>
+                </template>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <div class="el-number-input">
+                    <input
+                      type="number"
+                      v-model.number="auditRetention"
+                      min="0"
+                      class="el-number-input__inner"
+                      placeholder="默认 30"
+                    />
+                    <div class="el-number-input__controls">
+                      <button
+                        type="button"
+                        class="el-number-input__increase"
+                        title="增加 1 天"
+                        @click="auditRetention = (auditRetention || 0) + 1"
+                      >
+                        <svg viewBox="0 0 1024 1024" width="6" height="6" fill="currentColor"><path d="M512 320l320 384H192z"></path></svg>
+                      </button>
+                      <button
+                        type="button"
+                        class="el-number-input__decrease"
+                        title="减少 1 天"
+                        @click="auditRetention = Math.max(0, (auditRetention || 0) - 1)"
+                      >
+                        <svg viewBox="0 0 1024 1024" width="6" height="6" fill="currentColor"><path d="M512 704L192 320h640z"></path></svg>
+                      </button>
+                    </div>
+                  </div>
+                  <span style="font-size: 12px; color: #6b7280;">天</span>
+                </div>
               </n-form-item>
-              <n-form-item label="执行历史与日志保留" feedback="设定构建发布历史及日志缓存的最大保留天数。设为 0 或留空则永久保留。">
-                <n-input-number v-model:value="historyRetention" :min="0" placeholder="默认 30 天，0 表示永久">
-                  <template #suffix>天</template>
-                </n-input-number>
+              <n-form-item>
+                <template #label>
+                  <span style="white-space: nowrap; display: inline-flex; align-items: center;">
+                    <span>执行历史与日志保留</span>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <span class="help-icon">?</span>
+                      </template>
+                      <span>设定构建发布历史及日志缓存的最大保留天数。设为 0 或留空则永久保留。</span>
+                    </n-tooltip>
+                  </span>
+                </template>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <div class="el-number-input">
+                    <input
+                      type="number"
+                      v-model.number="historyRetention"
+                      min="0"
+                      class="el-number-input__inner"
+                      placeholder="默认 30"
+                    />
+                    <div class="el-number-input__controls">
+                      <button
+                        type="button"
+                        class="el-number-input__increase"
+                        title="增加 1 天"
+                        @click="historyRetention = (historyRetention || 0) + 1"
+                      >
+                        <svg viewBox="0 0 1024 1024" width="6" height="6" fill="currentColor"><path d="M512 320l320 384H192z"></path></svg>
+                      </button>
+                      <button
+                        type="button"
+                        class="el-number-input__decrease"
+                        title="减少 1 天"
+                        @click="historyRetention = Math.max(0, (historyRetention || 0) - 1)"
+                      >
+                        <svg viewBox="0 0 1024 1024" width="6" height="6" fill="currentColor"><path d="M512 704L192 320h640z"></path></svg>
+                      </button>
+                    </div>
+                  </div>
+                  <span style="font-size: 12px; color: #6b7280;">天</span>
+                </div>
               </n-form-item>
-              <n-form-item label="计划列表保留" feedback="只清理已结束计划；等待中和运行中计划不会删除。设为 0 则永久保留。">
-                <n-input-number v-model:value="planRetention" :min="0" placeholder="默认 30 天，0 表示永久">
-                  <template #suffix>天</template>
-                </n-input-number>
+              <n-form-item>
+                <template #label>
+                  <span style="white-space: nowrap; display: inline-flex; align-items: center;">
+                    <span>计划列表保留</span>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <span class="help-icon">?</span>
+                      </template>
+                      <span>只清理已结束计划；等待中和运行中计划不会删除。设为 0 则永久保留。</span>
+                    </n-tooltip>
+                  </span>
+                </template>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <div class="el-number-input">
+                    <input
+                      type="number"
+                      v-model.number="planRetention"
+                      min="0"
+                      class="el-number-input__inner"
+                      placeholder="默认 30"
+                    />
+                    <div class="el-number-input__controls">
+                      <button
+                        type="button"
+                        class="el-number-input__increase"
+                        title="增加 1 天"
+                        @click="planRetention = (planRetention || 0) + 1"
+                      >
+                        <svg viewBox="0 0 1024 1024" width="6" height="6" fill="currentColor"><path d="M512 320l320 384H192z"></path></svg>
+                      </button>
+                      <button
+                        type="button"
+                        class="el-number-input__decrease"
+                        title="减少 1 天"
+                        @click="planRetention = Math.max(0, (planRetention || 0) - 1)"
+                      >
+                        <svg viewBox="0 0 1024 1024" width="6" height="6" fill="currentColor"><path d="M512 704L192 320h640z"></path></svg>
+                      </button>
+                    </div>
+                  </div>
+                  <span style="font-size: 12px; color: #6b7280;">天</span>
+                </div>
               </n-form-item>
-              <div style="margin-top: 32px; display: flex; justify-content: flex-end;">
-                <n-button type="primary" :loading="submitRetentionLoading" @click="submitRetentionPolicy">
+              <div style="margin-top: 10px; display: flex; justify-content: flex-start;">
+                <n-button type="primary" size="small" :loading="submitRetentionLoading" @click="submitRetentionPolicy">
                   保存策略
                 </n-button>
               </div>
@@ -118,10 +232,15 @@
             <n-divider style="margin: 32px 0 24px 0;" />
 
             <div class="reset-sequence-block">
-              <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 8px;">历史记录 ID 序号重置</h3>
-              <p class="muted" style="font-size: 13px; margin-bottom: 16px; line-height: 1.6;">
-                清空当前的发布历史与外部构建记录，将数据库自增主键序号彻底归零重置。重置后，系统产生的新构建记录将重新从 <strong>ID #1</strong> 开始计算。
-              </p>
+              <div style="display: flex; align-items: center; gap: 4px; margin-bottom: 12px;">
+                <h3 style="font-size: 15px; font-weight: 600; margin: 0;">历史记录 ID 序号重置</h3>
+                <n-tooltip trigger="hover">
+                  <template #trigger>
+                    <span class="help-icon">?</span>
+                  </template>
+                  <span>清空当前的发布历史与外部构建记录，将数据库自增主键序号彻底归零重置。重置后，系统产生的新构建记录将重新从 ID #1 开始计算。</span>
+                </n-tooltip>
+              </div>
               <n-button type="warning" secondary :loading="resetSeqLoading" @click="confirmResetSequence">
                 ID 重新从 #1 开始计算
               </n-button>
@@ -173,7 +292,6 @@ import {
   NForm,
   NFormItem,
   NInput,
-  NInputNumber,
   NModal,
   NPagination,
   NSelect,
@@ -183,6 +301,7 @@ import {
   NTabPane,
   NTabs,
   NTag,
+  NTooltip,
   useDialog,
   useMessage,
 } from 'naive-ui';
@@ -610,8 +729,8 @@ function translateDetails(action: string, details: string | null | undefined): s
     if (match) return `配置系统参数项: ${match[1]}`;
   }
 
-  if (action === 'IDEMPOTENCY_CONFLICT') {
-    return `操作由于幂等键冲突被拦截 (${details})`;
+  if (action === 'RESET_HISTORY_SEQUENCE') {
+    return '清空所有历史记录并归零 ID 序号';
   }
   
   return details;
@@ -619,6 +738,140 @@ function translateDetails(action: string, details: string | null | undefined): s
 </script>
 
 <style scoped>
+.help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  margin-left: 3px;
+  position: relative;
+  top: -5px;
+  border-radius: 50%;
+  background: #e5e7eb;
+  color: #6b7280;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+  transition: all 0.2s ease;
+}
+
+.help-icon:hover {
+  background: #1890ff;
+  color: #ffffff;
+  transform: scale(1.15);
+}
+
+/* 纯正 Element Plus 风格数字微调输入框控件 (紧凑小巧版) */
+.el-number-input {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  width: 64px;
+  height: 24px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background-color: #ffffff;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.el-number-input:hover {
+  border-color: #c0c4cc;
+}
+
+.el-number-input:focus-within {
+  border-color: #409eff;
+  box-shadow: 0 0 0 1px #409eff;
+}
+
+.el-number-input__inner {
+  width: calc(100% - 18px);
+  height: 100%;
+  padding: 0 4px 0 6px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 12px;
+  color: #606266;
+  box-sizing: border-box;
+}
+
+.el-number-input__inner::-webkit-outer-spin-button,
+.el-number-input__inner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.el-number-input__inner[type=number] {
+  -moz-appearance: textfield;
+}
+
+.el-number-input__controls {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 18px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #dcdfe6;
+  background-color: #f5f7fa;
+  box-sizing: border-box;
+}
+
+.el-number-input__increase,
+.el-number-input__decrease {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 50%;
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: #909399;
+  transition: color 0.15s ease, background-color 0.15s ease;
+  box-sizing: border-box;
+}
+
+.el-number-input__increase {
+  border-bottom: 1px solid #e4e7ed;
+}
+
+.el-number-input__increase:hover,
+.el-number-input__decrease:hover {
+  color: #409eff;
+  background-color: #ecf5ff;
+}
+
+.el-number-input__increase:active,
+.el-number-input__decrease:active {
+  color: #337ecc;
+}
+
+.el-number-input__increase svg,
+.el-number-input__decrease svg {
+  display: block;
+  margin: 0 auto;
+  fill: currentColor;
+}
+
+:deep(.n-popover:not(.n-popover--raw)) {
+  background-color: #ffffff !important;
+  color: #374151 !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08), 0 1px 4px rgba(0, 0, 0, 0.04) !important;
+  border: 1px solid #e5e7eb !important;
+}
+
+:deep(.n-popover-arrow) {
+  background-color: #ffffff !important;
+}
+
 .tab-alert {
   margin: 14px 16px;
 }
@@ -643,12 +896,19 @@ function translateDetails(action: string, details: string | null | undefined): s
   background: #fafafa;
 }
 
-.channel-card__top,
-.channel-actions {
+.channel-card__top {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.channel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
 }
 
 .channel-meta {
@@ -700,5 +960,23 @@ function translateDetails(action: string, details: string | null | undefined): s
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+</style>
+
+<style>
+/* 强制覆盖 Teleport 至 document.body 的 Naive UI Tooltip 为纯白精致卡片主题 */
+body .n-popover.n-popover--tooltip,
+body .n-popover-shared.n-popover--tooltip {
+  background-color: #ffffff !important;
+  color: #1f2937 !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1), 0 1px 4px rgba(0, 0, 0, 0.04) !important;
+  border: 1px solid #e5e7eb !important;
+  font-size: 12px !important;
+  border-radius: 6px !important;
+}
+
+body .n-popover.n-popover--tooltip .n-popover-arrow,
+body .n-popover-shared.n-popover--tooltip .n-popover-arrow {
+  background-color: #ffffff !important;
 }
 </style>

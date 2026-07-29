@@ -17,6 +17,7 @@ class ReleasePlanCreate(BaseModel):
     execute_time: Optional[datetime] = None
     interval_minutes: int = 0
     pipeline_failure_strategy: str = "STOP" # STOP, CONTINUE
+    notify_dingtalk: bool = False
     tasks: List[ReleaseTaskCreate]
 
 class ReleasePlanUpdate(BaseModel):
@@ -24,6 +25,7 @@ class ReleasePlanUpdate(BaseModel):
     execute_time: Optional[datetime] = None
     interval_minutes: Optional[int] = None
     pipeline_failure_strategy: Optional[str] = None
+    notify_dingtalk: Optional[bool] = None
 
 class ReleaseTaskResponse(BaseModel):
     id: int
@@ -59,6 +61,7 @@ class ReleasePlanResponse(BaseModel):
     execute_time: Optional[datetime] = None
     interval_minutes: int
     pipeline_failure_strategy: str
+    notify_dingtalk: bool = False
     status: str
     creator_id: int
     created_at: datetime

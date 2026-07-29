@@ -87,7 +87,7 @@
       </n-steps>
 
       <div v-if="currentStep === 1" class="wizard-section">
-        <n-form label-placement="left" label-width="110">
+        <n-form label-placement="left" label-align="right" label-width="100">
           <n-form-item label="计划名称" required>
             <n-input v-model:value="wizardForm.name" placeholder="例如 prod-api-2026.07.09" />
           </n-form-item>
@@ -118,6 +118,20 @@
           <n-form-item v-if="wizardForm.type === 'PIPELINE'" label="失败策略">
             <n-select v-model:value="wizardForm.pipeline_strategy" :options="strategyOptions" />
           </n-form-item>
+          <n-form-item label="钉钉通知">
+            <div style="display: flex; align-items: center; min-height: 34px; gap: 10px;">
+              <n-switch v-model:value="wizardForm.notify_dingtalk" :disabled="dingtalkStatus !== 'ENABLED'" />
+              <span v-if="dingtalkStatus === 'NONE'" style="color: #fa8c16; font-size: 13px;">
+                系统未配置钉钉机器人，请先至系统设置中配置
+              </span>
+              <span v-else-if="dingtalkStatus === 'DISABLED'" style="color: #fa8c16; font-size: 13px;">
+                系统钉钉机器人已被禁用，请先至系统设置中启用
+              </span>
+              <span v-else style="color: #8c8c8c; font-size: 13px;">
+                {{ wizardForm.notify_dingtalk ? '发布状态变更时将自动推送钉钉消息' : '默认不推送钉钉通知' }}
+              </span>
+            </div>
+          </n-form-item>
         </n-form>
       </div>
 
@@ -146,6 +160,7 @@
           <div><span>类型</span><strong>{{ formatPlanType(wizardForm.type) }}</strong></div>
           <div><span>任务数</span><strong class="mono">{{ wizardForm.tasks.length }}</strong></div>
           <div><span>时间</span><strong class="mono">{{ wizardForm.execute_time ? new Date(wizardForm.execute_time).toLocaleString() : '立即执行' }}</strong></div>
+          <div><span>钉钉通知</span><strong :style="{ color: wizardForm.notify_dingtalk ? '#1890ff' : 'inherit' }">{{ wizardForm.notify_dingtalk ? '开启' : '关闭' }}</strong></div>
         </div>
         <div class="table-wrap">
           <table class="ops-table preview-table">
@@ -205,6 +220,7 @@ import {
   NSkeleton,
   NStep,
   NSteps,
+  NSwitch,
   NTag,
   useDialog,
   useMessage,
@@ -239,6 +255,7 @@ interface ReleasePlan {
   execute_time?: string | null;
   interval_minutes: number;
   pipeline_failure_strategy: string;
+  notify_dingtalk?: boolean;
   status: string;
   creator_id: number;
   created_at: string;
@@ -267,6 +284,8 @@ const error = ref('');
 const busyKey = ref('');
 const plans = ref<ReleasePlan[]>([]);
 const servers = ref<Array<{ id: number; name: string; is_active: number }>>([]);
+const dingtalkStatus = ref<'NONE' | 'DISABLED' | 'ENABLED'>('NONE');
+const hasDingTalkConfig = computed(() => dingtalkStatus.value === 'ENABLED');
 const keyword = ref('');
 const statusFilter = ref('ALL');
 const typeFilter = ref('ALL');
@@ -289,6 +308,7 @@ const wizardForm = ref({
   execute_time: null as number | null,
   interval_minutes: 2,
   pipeline_strategy: 'STOP',
+  notify_dingtalk: false,
   tasks: [emptyTask()],
 });
 
@@ -459,6 +479,23 @@ function deletePlan(plan: ReleasePlan) {
 
 
 
+async function checkDingTalkConfig() {
+  try {
+    const res = await request.get('/system/notify-configs');
+    const configs = res.data || [];
+    const dtConfigs = configs.filter((c: any) => c.channel_type === 'DINGTALK' && c.webhook_url);
+    if (!dtConfigs.length) {
+      dingtalkStatus.value = 'NONE';
+    } else if (!dtConfigs.some((c: any) => c.is_active)) {
+      dingtalkStatus.value = 'DISABLED';
+    } else {
+      dingtalkStatus.value = 'ENABLED';
+    }
+  } catch {
+    dingtalkStatus.value = 'NONE';
+  }
+}
+
 function buildPayload(plan: ReleasePlan, name = plan.name, type = plan.type) {
   return {
     name,
@@ -466,6 +503,7 @@ function buildPayload(plan: ReleasePlan, name = plan.name, type = plan.type) {
     execute_time: type === 'IMMEDIATE' ? null : plan.execute_time,
     interval_minutes: plan.interval_minutes || 0,
     pipeline_failure_strategy: plan.pipeline_failure_strategy || 'STOP',
+    notify_dingtalk: Boolean(plan.notify_dingtalk),
     tasks: plan.tasks.map((task, index) => ({
       server_id: task.server_id,
       job_id: task.job_id,
@@ -478,7 +516,8 @@ function buildPayload(plan: ReleasePlan, name = plan.name, type = plan.type) {
   };
 }
 
-function openCreateWizard() {
+async function openCreateWizard() {
+  await checkDingTalkConfig();
   wizardMode.value = 'create';
   editingPlanId.value = null;
   currentStep.value = 1;
@@ -491,6 +530,7 @@ function openCreateWizard() {
     execute_time: null,
     interval_minutes: 2,
     pipeline_strategy: 'STOP',
+    notify_dingtalk: false,
     tasks: [emptyTask()],
   };
   if (servers.value.length === 1) {
@@ -501,6 +541,7 @@ function openCreateWizard() {
 }
 
 async function openEditWizard(plan: ReleasePlan) {
+  await checkDingTalkConfig();
   wizardMode.value = 'edit';
   editingPlanId.value = plan.id;
   currentStep.value = 1;
@@ -531,6 +572,7 @@ async function openEditWizard(plan: ReleasePlan) {
     execute_time: plan.execute_time ? new Date(plan.execute_time).getTime() : null,
     interval_minutes: plan.interval_minutes || 2,
     pipeline_strategy: plan.pipeline_failure_strategy || 'STOP',
+    notify_dingtalk: hasDingTalkConfig.value ? Boolean(plan.notify_dingtalk) : false,
     tasks: tasks.length ? tasks : [emptyTask()],
   };
   showWizard.value = true;
@@ -658,6 +700,7 @@ async function submitPlan() {
     execute_time: wizardForm.value.execute_time ? new Date(wizardForm.value.execute_time).toISOString() : null,
     interval_minutes: wizardForm.value.interval_minutes || 0,
     pipeline_failure_strategy: wizardForm.value.pipeline_strategy,
+    notify_dingtalk: wizardForm.value.notify_dingtalk,
     status: 'WAITING',
     creator_id: 0,
     created_at: new Date().toISOString(),
@@ -729,7 +772,7 @@ function stopPolling() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadPlans(), loadServers()]);
+  await Promise.all([loadPlans(), loadServers(), checkDingTalkConfig()]);
   if (route.query.edit) await openEditFromQuery(route.query.edit);
   startPolling();
 });
@@ -740,6 +783,18 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+:deep(.n-form-item-label) {
+  position: relative;
+  justify-content: flex-end;
+}
+
+:deep(.n-form-item-label__asterisk) {
+  position: absolute;
+  right: -10px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
 .skeleton-block,
 .wizard-section {
   padding: 20px 6px;

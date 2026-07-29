@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Jenkins Release Scheduler"
-    BASE_PATH: str = "/"
+    BASE_PATH: str = "/jenkins"
     
     # Environment
     APP_ENV: str = "production"

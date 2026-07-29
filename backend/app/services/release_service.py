@@ -10,7 +10,11 @@ from app.core.database import SyncSessionLocal
 from app.models.release import ReleasePlan, ReleaseTask, ReleaseHistory
 from app.models.jenkins import JenkinsServer, JenkinsJob
 from app.services.jenkins_client import JenkinsClient, jenkins_datetime, normalize_jenkins_status
-from app.services.notification import send_release_notification
+from app.services.notification import (
+    send_release_notification,
+    send_plan_summary_notification,
+    send_plan_start_notification
+)
 from app.services.release_preflight import preflight_block_reason
 
 ACTIVE_TASK_STATUSES = ("QUEUED", "BUILDING", "RUNNING")
@@ -120,6 +124,9 @@ def execute_release_task(plan_id: int, task_id: int):
     finally:
         db.close()
 
+    # 计划触发启动时进行【开始通知】（内置 plan_start 防重与 start 事件匹配校验）
+    send_plan_start_notification(plan_id)
+
     # Spawn a separate thread to handle long running polls so APScheduler thread pool is not blocked
     t = threading.Thread(target=execute_task_workflow, args=(plan_id, task_id))
     t.start()
@@ -204,6 +211,7 @@ def reconcile_single_task(db: Session, task_id: int) -> bool:
             db.refresh(task)
             if result.rowcount != 1:
                 return False
+            task.duration = 0
             db.commit()
             return True
             
@@ -696,5 +704,6 @@ def check_and_finalize_plan(db: Session, plan_id: int):
         
     db.commit()
     logger.info(f"Release Plan {plan_id} completed execution. Final consolidated status: {plan.status}")
+    send_plan_summary_notification(plan_id)
 
 

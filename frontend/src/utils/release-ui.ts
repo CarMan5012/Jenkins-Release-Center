@@ -90,14 +90,53 @@ export function formatDateTime(value?: string | null): string {
   return date.toLocaleString();
 }
 
-export function getPlanDurationSeconds(plan: PlanLike): number | null {
-  const durations = plan.tasks?.map((task) => task.duration || 0).filter((duration) => duration > 0) || [];
-  if (durations.length) return durations.reduce((sum, duration) => sum + duration, 0);
+export function getTaskDurationSeconds(task: {
+  status: string;
+  duration?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}): number | null {
+  if (!task) return 0;
+  
+  // 1. 处于排队或等待状态且尚未有开始时间，耗时为 0
+  if (['WAITING', 'QUEUED'].includes(task.status) && !task.started_at) {
+    return 0;
+  }
+  
+  // 2. 处于构建中/运行中 (BUILDING / RUNNING) 状态
+  if (['BUILDING', 'RUNNING'].includes(task.status)) {
+    if (task.started_at) {
+      const startMs = new Date(task.started_at).getTime();
+      if (!Number.isNaN(startMs)) {
+        const nowMs = Date.now();
+        return Math.max(0, Math.round((nowMs - startMs) / 1000));
+      }
+    }
+    return 0;
+  }
 
-  const starts = plan.tasks?.map((task) => task.started_at ? new Date(task.started_at).getTime() : NaN).filter(Number.isFinite) || [];
-  const finishes = plan.tasks?.map((task) => task.finished_at ? new Date(task.finished_at).getTime() : NaN).filter(Number.isFinite) || [];
-  if (!starts.length || !finishes.length) return null;
-  return Math.max(0, Math.round((Math.max(...finishes) - Math.min(...starts)) / 1000));
+  // 3. 已完成状态，若有准确落盘的非零 duration，直接返回
+  if (task.duration && task.duration > 0) {
+    return task.duration;
+  }
+
+  // 4. 根据 finished_at - started_at 计算
+  if (task.started_at && task.finished_at) {
+    const startMs = new Date(task.started_at).getTime();
+    const finishMs = new Date(task.finished_at).getTime();
+    if (!Number.isNaN(startMs) && !Number.isNaN(finishMs)) {
+      return Math.max(0, Math.round((finishMs - startMs) / 1000));
+    }
+  }
+
+  return task.duration || 0;
+}
+
+export function getPlanDurationSeconds(plan: PlanLike): number | null {
+  if (!plan || !plan.tasks || !plan.tasks.length) return null;
+  const taskDurations = plan.tasks.map((task) => getTaskDurationSeconds(task) || 0);
+  const total = taskDurations.reduce((sum, d) => sum + d, 0);
+  return total > 0 ? total : null;
 }
 
 export function filterPlans<T extends PlanLike>(

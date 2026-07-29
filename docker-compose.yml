@@ -11,6 +11,7 @@ services:
       - "127.0.0.1:8021:8001"
     environment:
       - APP_ENV=development
+      - BASE_PATH=/jenkins
       - DB_TYPE=sqlite
       - SQLITE_PATH=/app/data/release-center.db
       - SQLITE_KEY_FILE=/run/secrets/sqlite_key
@@ -25,7 +26,7 @@ services:
     secrets:
       - sqlite_key
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/', timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3

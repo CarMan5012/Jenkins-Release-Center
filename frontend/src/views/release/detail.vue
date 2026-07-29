@@ -88,7 +88,7 @@
                       </span>
                     </td>
                     <td class="mono">{{ task.build_number || '-' }}</td>
-                    <td class="mono">{{ formatDuration(task.duration) }}</td>
+                    <td class="mono">{{ formatDuration(getTaskDurationSeconds(task)) }}</td>
                     <td>
                       <div style="display: flex; gap: 6px; align-items: center;">
                         <n-button size="tiny" secondary @click="showLog(task.id, null)">查看日志</n-button>
@@ -232,7 +232,7 @@ import PreflightResult from '../../components/PreflightResult.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
 import request from '../../utils/request';
-import { formatDateTime, formatDuration, formatPlanType, getPlanDurationSeconds, formatTriggerBy, getPreflightMeta, isPreflightBlocked } from '../../utils/release-ui';
+import { formatDateTime, formatDuration, formatPlanType, getPlanDurationSeconds, getTaskDurationSeconds, formatTriggerBy, getPreflightMeta, isPreflightBlocked } from '../../utils/release-ui';
 import type { PreflightStatus } from '../../utils/release-ui';
 
 interface ReleaseTask {

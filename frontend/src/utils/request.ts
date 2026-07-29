@@ -37,8 +37,10 @@ request.interceptors.response.use(
       localStorage.removeItem('token');
       localStorage.removeItem('username');
       localStorage.removeItem('role');
-      // Redirect to login view hash route
-      window.location.hash = '/login';
+      // Redirect to login view in HTML5 history routing
+      const baseUrl = import.meta.env.BASE_URL || '/';
+      const loginUrl = baseUrl.endsWith('/') ? `${baseUrl}login` : `${baseUrl}/login`;
+      window.location.href = loginUrl;
     }
     const message = error.response?.data?.detail || error.response?.data?.message || error.message || 'API 请求失败。';
     return Promise.reject(new Error(message));

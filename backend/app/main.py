@@ -83,6 +83,10 @@ app.add_exception_handler(Exception, global_exception_handler)
 # Register routes with tags for auto OpenAPI Swagger documentation
 base_prefix = "" if settings.BASE_PATH == "/" else settings.BASE_PATH
 
+@app.get("/health", tags=["Health Check"])
+def health_check():
+    return {"status": "ok", "base_path": settings.BASE_PATH}
+
 app.include_router(auth_router, prefix=f"{base_prefix}{settings.API_V1_STR}/auth", tags=["Authentication"])
 app.include_router(jenkins_router, prefix=f"{base_prefix}{settings.API_V1_STR}/jenkins", tags=["Jenkins Integration"])
 app.include_router(release_router, prefix=f"{base_prefix}{settings.API_V1_STR}/release", tags=["Release Management"])
@@ -99,13 +103,15 @@ dist_path = "/app/dist"
 @app.get("/{path_name:path}")
 def spa_fallback(path_name: str):
     clean_path = path_name
-    base_stripped = settings.BASE_PATH.lstrip('/')
+    base_stripped = settings.BASE_PATH.strip('/')
     if base_stripped:
         prefix_to_strip = base_stripped + "/"
         if path_name.startswith(prefix_to_strip):
             clean_path = path_name[len(prefix_to_strip):]
         elif path_name == base_stripped:
             clean_path = ""
+        else:
+            raise HTTPException(status_code=404, detail="资源未找到")
 
     # 1. Prevent interception of API routes, Swagger Docs, or OpenAPI schemas
     # API 404 should return standard JSON responses, not index.html

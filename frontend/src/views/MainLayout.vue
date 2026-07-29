@@ -45,10 +45,17 @@
           <strong>{{ currentRouteTitle }}</strong>
         </div>
 
-        <button class="logout-button" type="button" @click="confirmLogout">
-          <n-icon :component="LogOutOutline" aria-hidden="true" />
-          <span>退出</span>
-        </button>
+        <div class="topbar__right">
+          <div class="current-time-badge mono">
+            <n-icon :component="TimeOutline" class="time-icon" />
+            <span>{{ formattedCurrentTime }}</span>
+          </div>
+
+          <button class="logout-button" type="button" @click="confirmLogout">
+            <n-icon :component="LogOutOutline" aria-hidden="true" />
+            <span>退出</span>
+          </button>
+        </div>
       </header>
 
       <main class="content">
@@ -59,7 +66,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { NIcon, NTooltip, useDialog } from 'naive-ui';
 import {
@@ -69,6 +76,7 @@ import {
   HomeOutline,
   LogOutOutline,
   SettingsOutline,
+  TimeOutline,
   ChevronBackOutline,
   ChevronForwardOutline,
 } from '@vicons/ionicons5';
@@ -79,6 +87,34 @@ const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 const dialog = useDialog();
+
+const currentTime = ref(new Date());
+let timeTimer: any = null;
+
+function updateTime() {
+  currentTime.value = new Date();
+}
+
+const formattedCurrentTime = computed(() => {
+  const now = currentTime.value;
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const date = String(now.getDate()).padStart(2, '0');
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  const weekDays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const week = weekDays[now.getDay()];
+  return `${year}/${month}/${date} ${hours}:${minutes}:${seconds} ${week}`;
+});
+
+onMounted(() => {
+  timeTimer = setInterval(updateTime, 1000);
+});
+
+onUnmounted(() => {
+  if (timeTimer) clearInterval(timeTimer);
+});
 
 const isCollapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true');
 
@@ -356,32 +392,54 @@ async function handleLogout() {
   font-weight: 600;
 }
 
+.topbar__right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.current-time-badge,
 .logout-button {
+  height: 30px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 34px;
-  padding: 0 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: 10px;
+  padding: 0 10px;
   background: rgba(255, 255, 255, 0.82);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  font-size: 12px;
   color: var(--text-muted);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.current-time-badge {
+  font-variant-numeric: tabular-nums;
+}
+
+.time-icon,
+.logout-button :deep(.n-icon) {
+  font-size: 14px;
+}
+
+.time-icon {
+  color: var(--primary);
+}
+
+.logout-button {
   cursor: pointer;
   transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease, transform 0.16s ease;
 }
 
-.logout-button :deep(.n-icon) {
-  font-size: 16px;
-}
-
 .logout-button:hover {
-  border-color: var(--line);
-  background: #fff;
-  color: var(--text);
+  border-color: rgba(215, 0, 21, 0.3);
+  background: #ffffff;
+  color: var(--danger);
 }
 
 .logout-button:active {
-  transform: scale(0.98);
+  transform: scale(0.96);
 }
 
 .logout-button:focus-visible {
