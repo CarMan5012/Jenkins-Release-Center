@@ -656,3 +656,26 @@ def download_backup_zip(
         filename=filename,
         media_type="application/octet-stream"
     )
+
+@router.delete("/servers/{server_id}/backups/{backup_id}")
+def delete_backup(
+    request: Request,
+    server_id: int,
+    backup_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    backup = db.get(JenkinsBackup, backup_id)
+    if not backup or backup.server_id != server_id:
+        raise HTTPException(status_code=404, detail="未找到对应的备份记录")
+        
+    if backup.zip_path and os.path.exists(backup.zip_path):
+        try:
+            os.remove(backup.zip_path)
+        except OSError:
+            pass
+            
+    db.delete(backup)
+    db.commit()
+    log_action(db, current_user, "DELETE_BACKUP", get_client_ip(request), f"Deleted backup {backup_id} for server {server_id}")
+    return {"message": "备份删除成功"}

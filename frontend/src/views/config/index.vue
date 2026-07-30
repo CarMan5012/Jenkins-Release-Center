@@ -86,13 +86,27 @@
         </section>
       </n-tab-pane>
 
-      <n-tab-pane name="retention" tab="数据保留策略">
+      <n-tab-pane name="advanced" tab="高级配置">
         <section class="panel">
           <div class="panel__header">
-            <h2 class="panel__title">数据保留策略</h2>
+            <h2 class="panel__title">高级策略与基础设置</h2>
           </div>
-          <div style="padding: 20px 24px; max-width: 440px;">
-            <n-form label-placement="left" label-width="170" size="small" :show-feedback="false" style="display: grid; gap: 8px;">
+          <div style="padding: 20px 24px; max-width: 500px;">
+            <n-form label-placement="left" label-width="170" size="small" :show-feedback="false" style="display: grid; gap: 16px;">
+              <n-form-item>
+                <template #label>
+                  <span style="white-space: nowrap; display: inline-flex; align-items: center;">
+                    <span>系统外部访问地址</span>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <span class="help-icon">?</span>
+                      </template>
+                      <span>用于发送钉钉通知等外部跳转时的链接前缀。例如: http://jenkins.com</span>
+                    </n-tooltip>
+                  </span>
+                </template>
+                <n-input v-model:value="systemUrl" placeholder="默认: http://localhost:3000" />
+              </n-form-item>
               <n-form-item>
                 <template #label>
                   <span style="white-space: nowrap; display: inline-flex; align-items: center;">
@@ -222,9 +236,52 @@
                   <span style="font-size: 12px; color: #6b7280;">天</span>
                 </div>
               </n-form-item>
+              <n-form-item>
+                <template #label>
+                  <span style="white-space: nowrap; display: inline-flex; align-items: center;">
+                    <span>Jenkins 备份保留数量</span>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <span class="help-icon">?</span>
+                      </template>
+                      <span>设定每个 Jenkins 实例最大保留的备份记录数量。设为 0 或留空则永久保留。</span>
+                    </n-tooltip>
+                  </span>
+                </template>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <div class="el-number-input">
+                    <input
+                      type="number"
+                      v-model.number="backupRetention"
+                      min="0"
+                      class="el-number-input__inner"
+                      placeholder="默认 10"
+                    />
+                    <div class="el-number-input__controls">
+                      <button
+                        type="button"
+                        class="el-number-input__increase"
+                        title="增加 1 个"
+                        @click="backupRetention = (backupRetention || 0) + 1"
+                      >
+                        <svg viewBox="0 0 1024 1024" width="6" height="6" fill="currentColor"><path d="M512 320l320 384H192z"></path></svg>
+                      </button>
+                      <button
+                        type="button"
+                        class="el-number-input__decrease"
+                        title="减少 1 个"
+                        @click="backupRetention = Math.max(0, (backupRetention || 0) - 1)"
+                      >
+                        <svg viewBox="0 0 1024 1024" width="6" height="6" fill="currentColor"><path d="M512 704L192 320h640z"></path></svg>
+                      </button>
+                    </div>
+                  </div>
+                  <span style="font-size: 12px; color: #6b7280;">个</span>
+                </div>
+              </n-form-item>
               <div style="margin-top: 10px; display: flex; justify-content: flex-start;">
-                <UiverseButton variant="primary" size="sm" :loading="submitRetentionLoading" @click="submitRetentionPolicy">
-                  保存策略
+                <UiverseButton variant="primary" size="sm" :loading="submitAdvancedLoading" @click="submitAdvancedSettings">
+                  保存设置
                 </UiverseButton>
               </div>
             </n-form>
@@ -551,7 +608,9 @@ function deleteNotify(item: NotifyConfig) {
 const auditRetention = ref<number | null>(30);
 const historyRetention = ref<number | null>(30);
 const planRetention = ref<number | null>(30);
-const submitRetentionLoading = ref(false);
+const backupRetention = ref<number | null>(10);
+const systemUrl = ref<string>('');
+const submitAdvancedLoading = ref(false);
 
 async function loadSystemConfigs() {
   try {
@@ -574,13 +633,19 @@ async function loadSystemConfigs() {
 
     const planDays = configs.find((c: any) => c.config_key === 'plan_retention_days');
     planRetention.value = planDays ? parseInt(planDays.config_value) : 30;
+
+    const backupCount = configs.find((c: any) => c.config_key === 'jenkins_backup_retention_count');
+    backupRetention.value = backupCount ? parseInt(backupCount.config_value) : 10;
+    
+    const sysUrl = configs.find((c: any) => c.config_key === 'system_url');
+    systemUrl.value = sysUrl ? sysUrl.config_value : '';
   } catch (err: any) {
     message.error(err.message || '加载系统配置失败');
   }
 }
 
-async function submitRetentionPolicy() {
-  submitRetentionLoading.value = true;
+async function submitAdvancedSettings() {
+  submitAdvancedLoading.value = true;
   try {
     await Promise.all([
       request.post('/system/configs', {
@@ -597,13 +662,23 @@ async function submitRetentionPolicy() {
         config_key: 'plan_retention_days',
         config_value: String(planRetention.value ?? 30),
         description: '计划列表保留天数 (天，0表示永久保留)'
+      }),
+      request.post('/system/configs', {
+        config_key: 'jenkins_backup_retention_count',
+        config_value: String(backupRetention.value ?? 10),
+        description: 'Jenkins 备份最大保留数量 (个，0表示永久保留)'
+      }),
+      request.post('/system/configs', {
+        config_key: 'system_url',
+        config_value: systemUrl.value.trim(),
+        description: '系统外部访问地址前缀 (供第三方通知渠道如钉钉回调使用)'
       })
     ]);
-    message.success('数据保留策略保存成功');
+    message.success('高级设置保存成功');
   } catch (err: any) {
-    message.error(err.message || '数据保留策略保存失败');
+    message.error(err.message || '高级设置保存失败');
   } finally {
-    submitRetentionLoading.value = false;
+    submitAdvancedLoading.value = false;
   }
 }
 

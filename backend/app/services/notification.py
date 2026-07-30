@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Optional
 from loguru import logger
 from sqlalchemy.orm import Session
 from app.core.database import SyncSessionLocal
-from app.models.system import NotifyConfig
+from app.models.system import NotifyConfig, SystemConfig
 from app.models.release import ReleaseTask, ReleasePlan
 from app.models.jenkins import JenkinsServer, JenkinsJob, JenkinsView
 import urllib.parse
@@ -203,17 +203,21 @@ def send_plan_start_notification(plan_id: int):
         total_jobs = len(plan_tasks)
         environment = get_plan_environment(db, plan_tasks)
 
-        title = "发布开始"
+        title = "🚀 发布任务已启动"
         markdown_lines = [
-            f"**计划名称**：{plan.name}",
-            f"**环境**：{environment}",
-            f"**Job 数量**：{total_jobs} 个",
-            '**当前状态**：<font color="#1677FF">执行中</font>'
+            f"### 🚀 发布任务已启动",
+            f"> **计划名称**：{plan.name}",
+            f"> **目标视图**：{environment}",
+            f"> ",
+            f"> **包含任务**：{total_jobs} 个",
+            f'> **当前状态**：<font color="#1677FF">执行中...</font>'
         ]
 
         markdown_content = "  \n".join(markdown_lines)
-        plain_content = f"计划名称: {plan.name}, 环境: {environment}, Job 数量: {total_jobs} 个, 当前状态: 执行中"
-        detail_url = f"http://localhost:3000/#/release/detail/{plan.id}"
+        plain_content = f"计划名称: {plan.name}, 视图: {environment}, Job 数量: {total_jobs} 个, 当前状态: 执行中"
+        system_url_config = db.query(SystemConfig).filter(SystemConfig.config_key == "system_url").first()
+        base_url = system_url_config.config_value.rstrip('/') if system_url_config and system_url_config.config_value else "http://localhost:3000"
+        detail_url = f"{base_url}/#/release/detail/{plan.id}"
 
         for config in configs:
             if config.channel_type == "DINGTALK":
@@ -272,42 +276,47 @@ def send_plan_summary_notification(plan_id: int):
             duration_seconds = sum(t.duration for t in plan_tasks if t.duration)
 
         duration_str = format_duration(duration_seconds)
-        detail_url = f"http://localhost:3000/#/release/detail/{plan.id}"
+        system_url_config = db.query(SystemConfig).filter(SystemConfig.config_key == "system_url").first()
+        base_url = system_url_config.config_value.rstrip('/') if system_url_config and system_url_config.config_value else "http://localhost:3000"
+        detail_url = f"{base_url}/#/release/detail/{plan.id}"
 
         # 划分终态类型：发布取消 / 发布失败 / 发布成功
         if plan.status == "CANCELLED":
-            title = "发布取消"
+            title = "⚠️ 发布已取消"
             plan_event = "failed"
             markdown_lines = [
-                f"**计划名称**：{plan.name}",
-                f"**环境**：{environment}",
-                f"**成功数量**：{success_count} 个",
-                f"**失败数量**：{fail_count} 个",
-                f'**总耗时**：<font color="#8C8C8C">{duration_str}</font>'
+                f"### ⚠️ 发布已取消",
+                f"> **计划名称**：{plan.name}",
+                f"> **目标视图**：{environment}",
+                f"> ",
+                f'> **执行结果**：<font color="#8C8C8C">已手动取消</font>',
+                f"> **总耗时**：{duration_str}"
             ]
         elif fail_count > 0 or plan.status == "FAILED":
-            title = "发布失败"
+            title = "❌ 发布出现失败"
             plan_event = "failed"
             markdown_lines = [
-                f"**计划名称**：{plan.name}",
-                f"**环境**：{environment}",
-                f"**成功数量**：{success_count} 个",
-                f'**失败数量**：<font color="#FF4D4F">{fail_count}</font> 个',
-                f"**总耗时**：{duration_str}"
+                f"### ❌ 发布出现失败",
+                f"> **计划名称**：{plan.name}",
+                f"> **目标视图**：{environment}",
+                f"> ",
+                f'> **执行结果**：<font color="#52C41A">{success_count} 成功</font> / <font color="#FF4D4F">{fail_count} 失败</font>',
+                f"> **总耗时**：{duration_str}"
             ]
         else:
-            title = "发布成功"
+            title = "🎉 发布已完成 (成功)"
             plan_event = "success"
             markdown_lines = [
-                f"**计划名称**：{plan.name}",
-                f"**环境**：{environment}",
-                f'**成功数量**：<font color="#52C41A">{success_count}</font> 个',
-                f"**失败数量**：0 个",
-                f"**总耗时**：{duration_str}"
+                f"### 🎉 发布已完成 (成功)",
+                f"> **计划名称**：{plan.name}",
+                f"> **目标视图**：{environment}",
+                f"> ",
+                f'> **执行结果**：<font color="#52C41A">{success_count} 成功</font> / <font color="#FF4D4F">0 失败</font>',
+                f"> **总耗时**：{duration_str}"
             ]
 
         markdown_content = "  \n".join(markdown_lines)
-        plain_content = f"计划名称: {plan.name}, 环境: {environment}, 成功: {success_count}, 失败: {fail_count}, 总耗时: {duration_str}"
+        plain_content = f"计划名称: {plan.name}, 视图: {environment}, 成功: {success_count}, 失败: {fail_count}, 总耗时: {duration_str}"
 
         for config in configs:
             if config.channel_type == "DINGTALK":

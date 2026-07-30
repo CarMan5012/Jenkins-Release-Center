@@ -35,7 +35,7 @@
               <td>
                 <n-tag :type="statusType(item.status)" :bordered="false" size="small">
                   <template v-if="item.status === 'BACKUPING'" #icon>
-                    <n-spin size="small" />
+                    <n-spin :size="12" />
                   </template>
                   {{ statusText(item.status) }}
                 </n-tag>
@@ -60,6 +60,19 @@
                   >
                     下载配置
                   </n-button>
+                  <n-popconfirm @positive-click="deleteBackup(item.id)">
+                    <template #trigger>
+                      <n-button
+                        size="tiny"
+                        type="error"
+                        secondary
+                        :disabled="item.status === 'BACKUPING'"
+                      >
+                        删除
+                      </n-button>
+                    </template>
+                    确定彻底删除此备份吗？相关文件也将从磁盘清除。
+                  </n-popconfirm>
                 </div>
               </td>
             </tr>
@@ -328,6 +341,7 @@ import {
   NDrawer,
   NDrawerContent,
   NModal,
+  NPopconfirm,
   NPopover,
   NSkeleton,
   NSpin,
@@ -490,6 +504,17 @@ async function downloadZip(backupId: number) {
     URL.revokeObjectURL(url);
   } catch (err: any) {
     message.error(err.message || '下载失败，仅管理员可下载包含明文凭据的备份');
+  }
+}
+
+async function deleteBackup(backupId: number) {
+  if (!props.server) return;
+  try {
+    await request.delete(`/jenkins/servers/${props.server.id}/backups/${backupId}`);
+    message.success('备份已彻底删除');
+    await fetchBackups();
+  } catch (err: any) {
+    message.error(err.message || '删除备份失败');
   }
 }
 

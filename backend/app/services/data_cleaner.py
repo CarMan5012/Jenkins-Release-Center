@@ -81,6 +81,38 @@ def clean_expired_data():
         else:
             logger.info("Release plan retention policy is set to infinite. Skipping plan cleanup.")
             
+        # 4. 清理多余的 Jenkins 备份（按数量保留）
+        from app.models.jenkins import JenkinsBackup
+        from sqlalchemy import func
+        import os
+        
+        backup_config = db.query(SystemConfig).filter(
+            SystemConfig.config_key == "jenkins_backup_retention_count"
+        ).first()
+        retention_count = int(backup_config.config_value) if backup_config and backup_config.config_value else 10
+        if retention_count > 0:
+            server_ids = [row[0] for row in db.query(JenkinsBackup.server_id).distinct().all()]
+            for sid in server_ids:
+                # 获取该 server 按时间倒序的所有备份
+                backups_for_server = db.query(JenkinsBackup).filter(
+                    JenkinsBackup.server_id == sid
+                ).order_by(JenkinsBackup.backup_time.desc()).all()
+                
+                # 若总数超过保留数量，则删除多余的
+                if len(backups_for_server) > retention_count:
+                    expired_backups = backups_for_server[retention_count:]
+                    for backup in expired_backups:
+                        if backup.zip_path and os.path.exists(backup.zip_path):
+                            try:
+                                os.remove(backup.zip_path)
+                            except OSError as err:
+                                logger.warning(f"Failed to remove backup zip {backup.zip_path}: {err}")
+                        db.delete(backup)
+                    logger.info(f"Cleaned up {len(expired_backups)} excess Jenkins backups for server {sid}.")
+            db.commit()
+        else:
+            logger.info("Jenkins backup retention policy is set to infinite. Skipping backup cleanup.")
+            
     except Exception as e:
         db.rollback()
         logger.error(f"Error occurred during expired data cleanup: {str(e)}")
