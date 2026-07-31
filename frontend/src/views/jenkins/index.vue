@@ -300,12 +300,19 @@ const filteredJobs = computed(() => {
   });
 });
 
+let serversCacheRaw: any = null;
+
 async function loadServers() {
-  loading.value = true;
+  if (serversCacheRaw && !servers.value.length) {
+    servers.value = serversCacheRaw;
+  } else if (!servers.value.length) {
+    loading.value = true;
+  }
   error.value = '';
   try {
     const res = await request.get('/jenkins/servers');
     servers.value = res.data || [];
+    serversCacheRaw = res.data || [];
     
     if (!servers.value.length) {
       selectedServerId.value = null;

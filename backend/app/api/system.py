@@ -348,11 +348,18 @@ def format_trigger(trigger) -> str:
         return "定时单次触发"
     return "常规自动调度"
 
+_SCHEDULER_INFO_CACHE: Dict[str, Any] = {"timestamp": 0, "data": None}
+
 @router.get("/scheduler-info")
 def get_scheduler_info(
+    force_refresh: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    now_ts = datetime.now().timestamp()
+    if not force_refresh and _SCHEDULER_INFO_CACHE["data"] and (now_ts - _SCHEDULER_INFO_CACHE["timestamp"] < 5):
+        return _SCHEDULER_INFO_CACHE["data"]
+        
     try:
         scheduler = scheduler_manager.scheduler
         is_running = scheduler.running if hasattr(scheduler, "running") else False
@@ -552,7 +559,7 @@ def get_scheduler_info(
             except Exception:
                 latest_str = str(latest_backup_time)
 
-        return {
+        res_data = {
             "scheduler_summary": {
                 "status": "RUNNING",
                 "engine": "自动调度引擎",
@@ -571,6 +578,9 @@ def get_scheduler_info(
                 "latest_backup_at": latest_str
             }
         }
+        _SCHEDULER_INFO_CACHE["timestamp"] = now_ts
+        _SCHEDULER_INFO_CACHE["data"] = res_data
+        return res_data
     except Exception as e:
         from loguru import logger
         logger.error(f"Error fetching scheduler info: {e}")

@@ -93,7 +93,7 @@
             <div>
               <h2 class="panel__title">后台自动任务与运行状态</h2>
             </div>
-            <RefreshButton secondary size="small" label="刷新调度状态" :loading="schedulerLoading" @click="loadSchedulerInfo" />
+            <RefreshButton secondary size="small" label="刷新调度状态" :loading="schedulerLoading" @click="loadSchedulerInfo(true)" />
           </div>
 
           <div v-if="schedulerLoading && !schedulerInfo" style="padding: 24px;">
@@ -522,11 +522,21 @@ const editingNotifyId = ref<number | null>(null);
 const schedulerLoading = ref(false);
 const schedulerInfo = ref<any>(null);
 
-async function loadSchedulerInfo() {
-  schedulerLoading.value = true;
+// 本地 SWR 快照存储
+let schedulerCacheRaw: any = null;
+
+async function loadSchedulerInfo(force = false) {
+  if (schedulerCacheRaw && !schedulerInfo.value && !force) {
+    schedulerInfo.value = schedulerCacheRaw;
+  } else if (!schedulerInfo.value) {
+    schedulerLoading.value = true;
+  }
   try {
-    const res = await request.get('/system/scheduler-info');
+    const res = await request.get('/system/scheduler-info', {
+      params: force ? { force_refresh: true } : {}
+    });
     schedulerInfo.value = res.data;
+    schedulerCacheRaw = res.data;
   } catch (e: any) {
     message.error(e.message || '加载调度任务状态失败');
   } finally {
