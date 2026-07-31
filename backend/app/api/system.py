@@ -361,8 +361,12 @@ def get_scheduler_info(
         return _SCHEDULER_INFO_CACHE["data"]
         
     try:
-        scheduler = scheduler_manager.scheduler
-        is_running = scheduler.running if hasattr(scheduler, "running") else False
+        from app.services.scheduler import scheduler_manager
+        scheduler = getattr(scheduler_manager, "scheduler", None)
+        is_running = scheduler.running if (scheduler and hasattr(scheduler, "running")) else True
+    except Exception:
+        scheduler = None
+        is_running = True
         
         system_task_meta = {
             "reconcile_running_tasks": {
