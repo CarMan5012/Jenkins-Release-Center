@@ -37,7 +37,10 @@ def clean_expired_data():
                 retention_days = int(history_config.config_value)
                 if retention_days > 0:
                     cutoff_date = datetime.now() - timedelta(days=retention_days)
-                    deleted_count = db.query(ReleaseHistory).filter(ReleaseHistory.created_at < cutoff_date).delete()
+                    deleted_count = db.query(ReleaseHistory).filter(
+                        ReleaseHistory.created_at < cutoff_date,
+                        ReleaseHistory.status.in_(["SUCCESS", "FAILED", "CANCELLED", "UNSTABLE"])
+                    ).delete()
                     db.commit()
                     if deleted_count > 0:
                         logger.info(f"Cleaned up {deleted_count} expired release histories (older than {retention_days} days).")
