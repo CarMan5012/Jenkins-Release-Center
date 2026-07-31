@@ -376,6 +376,7 @@ async function loadPlans(trigger?: 'page' | 'refresh') {
   try {
     const res = await request.get('/release/plans');
     plans.value = res.data || [];
+    checkAndTogglePolling();
     if (trigger === 'refresh') {
       message.success('刷新成功');
     }
@@ -751,39 +752,66 @@ watch(() => route.query.edit, (value) => {
   if (value) openEditFromQuery(value);
 });
 
-let pollTimer: any = null;
+import { wsService } from '../../utils/websocket';
 
-async function fetchPlansSilent() {
-  try {
-    const res = await request.get('/release/plans');
-    plans.value = res.data || [];
-  } catch (e) {
-    // 静默轮询
-  }
+let fetchPlansSeq = 0;
+let fetchPlansTimer: any = null;
+let pollIntervalTimer: any = null;
+
+function hasActivePlans(list: ReleasePlan[]): boolean {
+  return list.some(p => ['RUNNING', 'QUEUED', 'BUILDING', 'WAITING'].includes(p.status));
 }
 
-function startPolling() {
-  stopPolling();
-  pollTimer = setInterval(() => {
-    fetchPlansSilent();
-  }, 3500);
+function checkAndTogglePolling() {
+  if (hasActivePlans(plans.value)) {
+    if (!pollIntervalTimer) {
+      pollIntervalTimer = setInterval(() => {
+        fetchPlansSilent();
+      }, 3000);
+    }
+  } else {
+    stopPolling();
+  }
 }
 
 function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
+  if (pollIntervalTimer) {
+    clearInterval(pollIntervalTimer);
+    pollIntervalTimer = null;
   }
+}
+
+async function fetchPlansSilent() {
+  const currentSeq = ++fetchPlansSeq;
+  try {
+    const res = await request.get('/release/plans');
+    if (currentSeq === fetchPlansSeq) {
+      plans.value = res.data || [];
+      checkAndTogglePolling();
+    }
+  } catch (e) {
+    // 静默刷新
+  }
+}
+
+function handleReleaseUpdate() {
+  if (fetchPlansTimer) clearTimeout(fetchPlansTimer);
+  fetchPlansTimer = setTimeout(() => {
+    fetchPlansSilent();
+  }, 200);
 }
 
 onMounted(async () => {
   await Promise.all([loadPlans(), loadServers(), checkDingTalkConfig()]);
+  checkAndTogglePolling();
   if (route.query.edit) await openEditFromQuery(route.query.edit);
-  startPolling();
+  wsService.on('RELEASE_UPDATE', handleReleaseUpdate);
 });
 
 onUnmounted(() => {
   stopPolling();
+  if (fetchPlansTimer) clearTimeout(fetchPlansTimer);
+  wsService.off('RELEASE_UPDATE', handleReleaseUpdate);
 });
 </script>
 

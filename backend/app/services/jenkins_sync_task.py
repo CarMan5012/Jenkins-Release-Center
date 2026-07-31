@@ -298,3 +298,8 @@ def sync_external_builds(server_id: Optional[int] = None, job_name: Optional[str
                 _sync_lock.release()
             except RuntimeError:
                 pass
+        try:
+            from app.core.ws_manager import manager
+            manager.broadcast_event("HISTORY_UPDATE")
+        except Exception:
+            pass

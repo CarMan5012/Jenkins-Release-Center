@@ -105,6 +105,7 @@ import LogViewer from '../../components/LogViewer.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
 import StatusBadge from '../../components/StatusBadge.vue';
 import request from '../../utils/request';
+import { wsService } from '../../utils/websocket';
 import { formatDateTime, formatDuration, formatTriggerBy } from '../../utils/release-ui';
 
 interface ReleaseHistory {
@@ -162,35 +163,15 @@ const limit = 15;
 const logModalVisible = ref(false);
 const activeHistory = ref<ReleaseHistory | null>(null);
 const activeTab = ref<'system' | 'external'>('system');
-let autoPollTimer: any = null;
+
+function handleHistoryUpdate() {
+  fetchHistories(false);
+}
 
 const statusOptions = [
   { label: '成功', value: 'SUCCESS' },
   { label: '失败', value: 'FAILED' },
 ];
-
-function stopAutoPolling() {
-  if (autoPollTimer) {
-    clearInterval(autoPollTimer);
-    autoPollTimer = null;
-  }
-}
-
-function startAutoPolling() {
-  stopAutoPolling();
-  autoPollTimer = setInterval(async () => {
-    try {
-      if (activeTab.value === 'external') {
-        await request.post('/history/sync', null, {
-          params: { job_name: queryJobName.value || undefined }
-        });
-      }
-      await fetchHistories(false);
-    } catch {
-      // Ignore silent background refresh errors
-    }
-  }, 3000);
-}
 
 async function onTabChange() {
   fetchHistories(true);
@@ -204,7 +185,6 @@ async function onTabChange() {
       // Ignore background sync errors on tab click
     }
   }
-  startAutoPolling();
 }
 
 async function syncExternalHistories() {
@@ -235,7 +215,7 @@ async function fetchHistories(resetPage = false, trigger?: 'page' | 'header' | '
       ? queryLoading
       : null;
   if (buttonLoading) buttonLoading.value = true;
-  else if (!autoPollTimer) pageLoading.value = true;
+  else pageLoading.value = true;
   const startTime = Date.now();
   error.value = '';
   try {
@@ -300,11 +280,11 @@ onMounted(async () => {
     }
   }
   await fetchHistories(true);
-  startAutoPolling();
+  wsService.on('HISTORY_UPDATE', handleHistoryUpdate);
 });
 
 onUnmounted(() => {
-  stopAutoPolling();
+  wsService.off('HISTORY_UPDATE', handleHistoryUpdate);
 });
 </script>
 

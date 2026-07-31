@@ -12,6 +12,7 @@ from app.core.database import get_db, SyncSessionLocal
 from app.core.security import encrypt_secret
 from app.api.deps import get_current_user, get_current_active_admin, get_current_active_operator, log_action
 from app.services.deps_helper import is_request_trusted_https, get_client_ip, validate_jenkins_url, normalize_idempotency_key
+from app.core.ws_manager import manager
 from app.models.jenkins import JenkinsServer, JenkinsView, JenkinsJob, JenkinsBackup
 from app.models.release import ReleaseHistory
 from app.models.user import User
@@ -104,7 +105,7 @@ def create_server(
     db.add(db_server)
     db.commit()
     db.refresh(db_server)
-    log_action(db, current_user, "CREATE_JENKINS_SERVER", get_client_ip(request), f"Created Jenkins Server {server.name}")
+    log_action(db, current_user, "CREATE_JENKINS_SERVER", get_client_ip(request), f"添加 Jenkins 实例: {server.name}")
     
     # 自动触发后台同步任务（仅在启用状态下）
     if db_server.is_active:
@@ -189,7 +190,7 @@ def update_server(
         
     db.commit()
     db.refresh(server)
-    log_action(db, current_user, "UPDATE_JENKINS_SERVER", get_client_ip(request), f"Updated Jenkins Server {server.name}")
+    log_action(db, current_user, "UPDATE_JENKINS_SERVER", get_client_ip(request), f"更新 Jenkins 实例: {server.name}")
     return server
 
 @router.delete("/servers/{server_id}")
@@ -228,7 +229,7 @@ def delete_server(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"强制删除失败：{str(e)}")
         
-    log_action(db, current_user, "DELETE_JENKINS_SERVER", get_client_ip(request), f"Deleted Jenkins Server {server.name} and all its dependencies")
+    log_action(db, current_user, "DELETE_JENKINS_SERVER", get_client_ip(request), f"删除 Jenkins 实例: {server.name} 及其关联依赖数据")
     return {"success": True, "message": "Jenkins 实例及相关的所有发布数据已强制删除"}
 
 @router.post("/servers/{server_id}/test")
@@ -379,6 +380,7 @@ def trigger_sync(
             loguru.logger.error(f"Background sync failed for server {sid}: {str(e)}")
         finally:
             syncing_servers.discard(sid)
+            manager.broadcast_event("SYNC_UPDATE", {"server_id": sid, "syncing": False})
             
     background_tasks.add_task(run_sync_and_cleanup, server_id)
     log_action(db, current_user, "SYNC_JENKINS", get_client_ip(request), f"Triggered background Views/Jobs sync for server {server.name}")
@@ -510,7 +512,7 @@ def run_job_directly(
     client = JenkinsClient(server.url, server.username, server.api_token)
     try:
         queue_url = client.trigger_build(job.name, parameters, branch=branch)
-        log_action(db, current_user, "RUN_JENKINS_JOB_DIRECTLY", get_client_ip(request), f"Directly triggered job '{job.name}' (branch: {branch}) on server '{server.name}'")
+        log_action(db, current_user, "RUN_JENKINS_JOB_DIRECTLY", get_client_ip(request), f"直接触发任务 '{job.name}' 构建 (分支: {branch})，实例: '{server.name}'")
         
         def delayed_sync():
             import time
@@ -552,7 +554,7 @@ def create_backup(
     if idem_key:
         existing = db.query(JenkinsBackup).filter(JenkinsBackup.idempotency_key == idem_key).first()
         if existing:
-            log_action(db, current_user, "IDEMPOTENCY_CONFLICT", get_client_ip(request), f"Idempotency conflict for backup key {idem_key}")
+            log_action(db, current_user, "IDEMPOTENCY_CONFLICT", get_client_ip(request), f"重复触发备份拦截，Key: {idem_key}")
             return existing
 
     db_backup = JenkinsBackup(
@@ -571,7 +573,7 @@ def create_backup(
         if idem_key:
             existing = db.query(JenkinsBackup).filter(JenkinsBackup.idempotency_key == idem_key).first()
             if existing:
-                log_action(db, current_user, "IDEMPOTENCY_CONFLICT", get_client_ip(request), f"Idempotency conflict for backup key {idem_key} on commit")
+                log_action(db, current_user, "IDEMPOTENCY_CONFLICT", get_client_ip(request), f"重复触发备份拦截，Key: {idem_key}")
                 return existing
         raise HTTPException(status_code=409, detail="并发请求冲突")
         
@@ -580,7 +582,7 @@ def create_backup(
     from app.services.jenkins_backup_service import execute_jenkins_backup
     background_tasks.add_task(execute_jenkins_backup, server_id, db_backup.id)
     
-    log_action(db, current_user, "CREATE_BACKUP", get_client_ip(request), f"Created backup task {db_backup.id} for server {server_id}")
+    log_action(db, current_user, "CREATE_BACKUP", get_client_ip(request), f"创建配置备份任务 #{db_backup.id}（实例: {server_id}）")
     return db_backup
 
 @router.get("/servers/{server_id}/backups", response_model=List[JenkinsBackupResponse])
@@ -628,7 +630,7 @@ def get_backup_details(
         with zipfile.ZipFile(io.BytesIO(decrypted_data)) as archive:
             details = json.loads(archive.read("details.json"))
             
-        log_action(db, current_user, "VIEW_BACKUP_DETAILS", get_client_ip(request), f"Viewed backup details for backup {backup_id} on server {server_id}")
+        log_action(db, current_user, "VIEW_BACKUP_DETAILS", get_client_ip(request), f"查看备份记录详情 #{backup_id}（实例: {server_id}）")
         return details
     except Exception:
         raise HTTPException(status_code=500, detail="备份详情配置无效")
@@ -648,7 +650,7 @@ def download_backup_zip(
         raise HTTPException(status_code=400, detail="备份文件缺失或尚未就绪。")
     
     # Audit log
-    log_action(db, current_user, "DOWNLOAD_BACKUP", get_client_ip(request), f"Downloaded encrypted backup {backup_id} for server {server_id}")
+    log_action(db, current_user, "DOWNLOAD_BACKUP", get_client_ip(request), f"下载加密备份包 #{backup_id}（实例: {server_id}）")
     
     filename = f"jenkins_backup_server_{server_id}_{backup.backup_time.strftime('%Y%m%d%H%M%S')}.zip.enc"
     return FileResponse(
@@ -677,5 +679,5 @@ def delete_backup(
             
     db.delete(backup)
     db.commit()
-    log_action(db, current_user, "DELETE_BACKUP", get_client_ip(request), f"Deleted backup {backup_id} for server {server_id}")
+    log_action(db, current_user, "DELETE_BACKUP", get_client_ip(request), f"删除配置备份记录 #{backup_id}（实例: {server_id}）")
     return {"message": "备份删除成功"}

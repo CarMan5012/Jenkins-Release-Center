@@ -16,6 +16,7 @@ from app.services.notification import (
     send_plan_start_notification
 )
 from app.services.release_preflight import preflight_block_reason
+from app.core.ws_manager import manager
 
 ACTIVE_TASK_STATUSES = ("QUEUED", "BUILDING", "RUNNING")
 
@@ -154,8 +155,7 @@ def resolve_task_build_number(
 
     if number is None:
         task.error_message = (
-            f"Jenkins queue #{task.jenkins_queue_id} unresolved; "
-            "no matching build number found."
+            f"Jenkins 队列节点已接收 (Queue ID: #{task.jenkins_queue_id})，等待 Jenkins 分配构建号..."
         )
         db.commit()
         return None
@@ -344,6 +344,7 @@ def execute_task_workflow(plan_id: int, task_id: int):
         task.status = "QUEUED"
         task.error_message = None
         db.commit()
+        manager.broadcast_event("RELEASE_UPDATE", {"plan_id": plan_id, "task_id": task.id, "status": "QUEUED"})
 
         def queue_on_poll(why: str):
             try:
@@ -351,7 +352,15 @@ def execute_task_workflow(plan_id: int, task_id: int):
                 if task.status == "CANCELLED":
                     raise RuntimeError(f"Task {task_id} was cancelled by user while queued in Jenkins.")
                 if why:
-                    task.error_message = f"Jenkins 队列等待: {why}"
+                    clean_why = why.strip()
+                    clean_lower = clean_why.lower()
+                    if "executor slot already in use" in clean_lower or "waiting for next available executor" in clean_lower:
+                        friendly_reason = "等待 Jenkins 执行器空闲"
+                    elif "in queue" in clean_lower:
+                        friendly_reason = "队列排队中"
+                    else:
+                        friendly_reason = clean_why
+                    task.error_message = f"排队原因: {friendly_reason}"
                 else:
                     task.error_message = None
                 db.commit()
@@ -414,6 +423,7 @@ def execute_task_workflow(plan_id: int, task_id: int):
         )
         db.commit()
         db.refresh(task)
+        manager.broadcast_event("RELEASE_UPDATE", {"plan_id": plan_id, "task_id": task.id, "status": "BUILDING"})
         if building_claim.rowcount != 1:
             if (
                 task.status == "CANCELLED"
@@ -599,6 +609,8 @@ def write_history(db: Session, task: ReleaseTask, status: str, duration: int, ra
     logger.info(
         f"Recorded ReleaseHistory for task {task.id} with status: {status}"
     )
+    manager.broadcast_event("HISTORY_UPDATE")
+    manager.broadcast_event("RELEASE_UPDATE", {"plan_id": task.plan_id, "task_id": task.id, "status": status})
 
 def handle_pipeline_success(db: Session, plan_id: int, task_id: int):
     """
@@ -682,6 +694,7 @@ def check_and_finalize_plan(db: Session, plan_id: int):
         if plan.status not in ["WAITING", "CANCELLED", "FAILED"]:
             plan.status = "WAITING"
             db.commit()
+            manager.broadcast_event("RELEASE_UPDATE", {"plan_id": plan_id, "status": "WAITING"})
         return
 
     # 2. 如果存在正在队列中或构建中的任务 (QUEUED, BUILDING, RUNNING) 或部分已完成，计划状态为 RUNNING
@@ -689,6 +702,7 @@ def check_and_finalize_plan(db: Session, plan_id: int):
         if plan.status != "RUNNING":
             plan.status = "RUNNING"
             db.commit()
+            manager.broadcast_event("RELEASE_UPDATE", {"plan_id": plan_id, "status": "RUNNING"})
         return
         
     # Check results to decide final plan state
@@ -705,5 +719,6 @@ def check_and_finalize_plan(db: Session, plan_id: int):
     db.commit()
     logger.info(f"Release Plan {plan_id} completed execution. Final consolidated status: {plan.status}")
     send_plan_summary_notification(plan_id)
+    manager.broadcast_event("RELEASE_UPDATE", {"plan_id": plan_id})
 
 

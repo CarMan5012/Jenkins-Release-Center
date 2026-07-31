@@ -19,10 +19,11 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue';
+import { onMounted, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from './store/auth';
 import request from './utils/request';
+import { wsService } from './utils/websocket';
 
 import {
   dateZhCN,
@@ -71,6 +72,17 @@ onMounted(() => {
     window.addEventListener(event, resetIdleTimer, { passive: true });
   });
   resetIdleTimer();
+  if (authStore.token) {
+    wsService.connect();
+  }
+});
+
+watch(() => authStore.token, (newToken) => {
+  if (newToken) {
+    wsService.connect();
+  } else {
+    wsService.disconnect();
+  }
 });
 
 onUnmounted(() => {
@@ -78,6 +90,7 @@ onUnmounted(() => {
     window.removeEventListener(event, resetIdleTimer);
   });
   if (idleTimer) window.clearTimeout(idleTimer);
+  wsService.disconnect();
 });
 
 

@@ -54,6 +54,18 @@ class SchedulerManager:
             )
             logger.info("Registered clean_expired_data background task.")
 
+            # Register cron job to auto backup active Jenkins servers daily at 2:00 AM
+            from app.services.jenkins_backup_service import auto_backup_active_jenkins_servers
+            self.scheduler.add_job(
+                auto_backup_active_jenkins_servers,
+                'cron',
+                hour=2,
+                minute=0,
+                id="auto_backup_jenkins_servers",
+                replace_existing=True
+            )
+            logger.info("Registered auto_backup_jenkins_servers daily 02:00 cron task.")
+
     def shutdown(self):
         if self.scheduler.running:
             self.scheduler.shutdown()

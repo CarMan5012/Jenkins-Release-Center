@@ -72,7 +72,7 @@ def get_task_logs(
     # Pattern 2: Task is running or log was not cached. Retrieve from Jenkins server.
     if not task.build_number:
         return {
-            "log_text": "Jenkins build is initializing and has not allocated a build number yet...",
+            "log_text": "Jenkins build is initializing and has not allocated a build number yet...\n",
             "next_start": 0,
             "has_more": True
         }
@@ -85,10 +85,14 @@ def get_task_logs(
     client = JenkinsClient(server.url, server.username, server.api_token)
     log_text, next_start, has_more = client.get_progressive_log(task.job_name, task.build_number, start)
     
+    # 只要任务尚处于运行/构建活动状态，即保持 has_more 为 True
+    is_active = task.status in ["QUEUED", "BUILDING", "RUNNING", "WAITING"]
+    effective_has_more = is_active or has_more
+
     return {
         "log_text": log_text,
         "next_start": next_start,
-        "has_more": has_more
+        "has_more": effective_has_more
     }
 
 @router.get("/{history_id}/logs", response_model=BuildLogResponse)
@@ -124,7 +128,7 @@ def get_history_logs(
                     return {
                         "log_text": log_text,
                         "next_start": next_start,
-                        "has_more": has_more
+                        "has_more": (history.status == "BUILDING") or has_more
                     }
                 except Exception:
                     pass
@@ -144,6 +148,11 @@ def sync_external_history(
     current_user: str = Depends(get_current_user)
 ):
     sync_external_builds(server_id=server_id, job_name=job_name)
+    try:
+        from app.core.ws_manager import manager
+        manager.broadcast_event("HISTORY_UPDATE")
+    except Exception:
+        pass
     return {"message": "外部构建记录已成功同步"}
 
 from sqlalchemy import text

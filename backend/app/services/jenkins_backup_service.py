@@ -1129,3 +1129,35 @@ def execute_jenkins_backup(server_id: int, backup_id: int):
         if temp_container:
             shutil.rmtree(temp_container, ignore_errors=True)
         db.close()
+
+
+def auto_backup_active_jenkins_servers():
+    """
+    Automated scheduled daily backup procedure for all active Jenkins servers.
+    Loops through enabled servers, creates DB backup records, and executes backup.
+    """
+    db = SyncSessionLocal()
+    try:
+        active_servers = db.query(JenkinsServer).filter(JenkinsServer.is_active == 1).all()
+        logging.info(f"Starting automatic scheduled backup for {len(active_servers)} active Jenkins servers.")
+        
+        for server in active_servers:
+            try:
+                db_backup = JenkinsBackup(
+                    server_id=server.id,
+                    status="BACKUPING",
+                    job_count=0
+                )
+                db.add(db_backup)
+                db.commit()
+                db.refresh(db_backup)
+                
+                logging.info(f"Triggering auto backup #{db_backup.id} for server '{server.name}' (ID: {server.id}).")
+                execute_jenkins_backup(server.id, db_backup.id)
+            except Exception as server_err:
+                logging.error(f"Error executing auto backup for server {server.id}: {server_err}")
+                db.rollback()
+    except Exception as e:
+        logging.error(f"Failed to run auto_backup_active_jenkins_servers: {e}")
+    finally:
+        db.close()

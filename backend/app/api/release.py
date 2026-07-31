@@ -420,7 +420,7 @@ def create_plan(
                 db.delete(current)
             db.commit()
             raise HTTPException(status_code=503, detail=f"注册发布排程失败: {error}")
-    log_action(db, current_user, "CREATE_RELEASE_PLAN", get_client_ip(request), f"Created release plan: {plan.name}")
+    log_action(db, current_user, "CREATE_RELEASE_PLAN", get_client_ip(request), f"创建发布计划: {plan.name}")
     return plan
 
 @router.get("/plans", response_model=List[ReleasePlanResponse])
@@ -650,7 +650,7 @@ def retry_plan_immediately(
         for t in plan.tasks:
             background_tasks.add_task(execute_release_task, plan.id, t.id)
             
-    log_action(db, current_user, "RETRY_RELEASE_PLAN", get_client_ip(request), f"Retried release plan in-place: {plan.name}")
+    log_action(db, current_user, "RETRY_RELEASE_PLAN", get_client_ip(request), f"重试整单发布计划: {plan.name}")
     return {"success": True, "message": "发布计划已原地重新触发执行", "id": plan.id}
 
 @router.post("/plans/{plan_id}/tasks/{task_id}/retry")
@@ -893,7 +893,7 @@ def update_plan(
     res = db.execute(stmt)
     plan = res.scalars().first()
 
-    log_action(db, current_user, "UPDATE_RELEASE_PLAN", get_client_ip(request), f"Updated release plan: {plan.name}")
+    log_action(db, current_user, "UPDATE_RELEASE_PLAN", get_client_ip(request), f"更新发布计划: {plan.name}")
     return plan
 
 @router.post("/tasks/{task_id}/sync")

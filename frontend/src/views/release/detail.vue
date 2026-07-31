@@ -85,11 +85,19 @@
                       </div>
                     </td>
                     <td class="mono">{{ task.branch }}</td>
-                    <td>
-                      <StatusBadge :status="task.status" :build-number="task.build_number" />
-                      <span v-if="['QUEUED', 'RUNNING'].includes(task.status) && !task.build_number && task.error_message" class="muted text-xs block" :title="task.error_message">
-                        {{ task.error_message }}
-                      </span>
+                    <td class="status-cell">
+                      <n-tooltip
+                        v-if="['QUEUED', 'RUNNING'].includes(task.status) && !task.build_number && task.error_message"
+                        trigger="hover"
+                        placement="top"
+                        tooltip-class="light-tooltip-popover"
+                      >
+                        <template #trigger>
+                          <StatusBadge :status="task.status" :build-number="task.build_number" style="cursor: help;" />
+                        </template>
+                        <span>{{ task.error_message }}</span>
+                      </n-tooltip>
+                      <StatusBadge v-else :status="task.status" :build-number="task.build_number" />
                     </td>
                     <td class="mono">{{ task.build_number || '-' }}</td>
                     <td class="mono">{{ formatDuration(getTaskDurationSeconds(task)) }}</td>
@@ -230,7 +238,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { NAlert, NButton, NSelect, NSkeleton, NTabPane, NTabs, NTag, NTimeline, NTimelineItem, useDialog, useMessage } from 'naive-ui';
+import { NAlert, NButton, NSelect, NSkeleton, NTabPane, NTabs, NTag, NTimeline, NTimelineItem, NTooltip, useDialog, useMessage } from 'naive-ui';
 import LogViewer from '../../components/LogViewer.vue';
 import PreflightResult from '../../components/PreflightResult.vue';
 import RefreshButton from '../../components/RefreshButton.vue';
@@ -362,6 +370,7 @@ async function loadPlan() {
     const res = await request.get(`/release/plans/${route.params.id}`);
     plan.value = res.data;
     selectedTaskId.value = orderedTasks.value[0]?.id || null;
+    checkAndTogglePolling();
   } catch (err: any) {
     error.value = err.message || '发布详情加载失败';
   } finally {
@@ -520,40 +529,74 @@ function timelineType(status: string): 'success' | 'error' | 'warning' | 'info' 
   return 'default';
 }
 
-let pollTimer: any = null;
 
-async function fetchPlanSilent() {
-  try {
-    const res = await request.get(`/release/plans/${route.params.id}`);
-    plan.value = res.data;
-  } catch (e) {
-    // 静默轮询
+import { wsService } from '../../utils/websocket';
+
+let fetchPlanSeq = 0;
+let fetchPlanTimer: any = null;
+let pollIntervalTimer: any = null;
+
+function isPlanActive(): boolean {
+  if (!plan.value) return false;
+  if (['RUNNING', 'QUEUED', 'BUILDING', 'WAITING'].includes(plan.value.status)) return true;
+  if (plan.value.tasks && plan.value.tasks.some((t: any) => ['RUNNING', 'QUEUED', 'BUILDING', 'WAITING'].includes(t.status))) return true;
+  return false;
+}
+
+function checkAndTogglePolling() {
+  if (isPlanActive()) {
+    if (!pollIntervalTimer) {
+      pollIntervalTimer = setInterval(() => {
+        fetchPlanSilent();
+      }, 3000);
+    }
+  } else {
+    stopPolling();
   }
 }
 
-function startPolling() {
-  stopPolling();
-  pollTimer = setInterval(() => {
-    fetchPlanSilent();
-  }, 3500);
+function stopPolling() {
+  if (pollIntervalTimer) {
+    clearInterval(pollIntervalTimer);
+    pollIntervalTimer = null;
+  }
 }
 
-function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
+async function fetchPlanSilent() {
+  const currentSeq = ++fetchPlanSeq;
+  try {
+    const res = await request.get(`/release/plans/${route.params.id}`);
+    if (currentSeq === fetchPlanSeq) {
+      plan.value = res.data;
+      await loadHistory();
+      checkAndTogglePolling();
+    }
+  } catch (e) {
+    // 静默刷新
+  }
+}
+
+function handleReleaseUpdate(data: any) {
+  if (!data || !data.plan_id || String(data.plan_id) === String(route.params.id)) {
+    if (fetchPlanTimer) clearTimeout(fetchPlanTimer);
+    fetchPlanTimer = setTimeout(() => {
+      fetchPlanSilent();
+    }, 200);
   }
 }
 
 onMounted(async () => {
   await loadPlan();
   await loadHistory();
-  startPolling();
+  checkAndTogglePolling();
+  wsService.on('RELEASE_UPDATE', handleReleaseUpdate);
 });
 
 import { onUnmounted } from 'vue';
 onUnmounted(() => {
   stopPolling();
+  if (fetchPlanTimer) clearTimeout(fetchPlanTimer);
+  wsService.off('RELEASE_UPDATE', handleReleaseUpdate);
 });
 </script>
 
@@ -626,5 +669,23 @@ onUnmounted(() => {
   max-width: 620px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+:deep(.light-tooltip-popover) {
+  background-color: #ffffff !important;
+  color: #1d1d1f !important;
+  border: 1px solid rgba(60, 60, 67, 0.14) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.04) !important;
+  border-radius: 8px !important;
+  padding: 8px 14px !important;
+  font-size: 12.5px !important;
+  line-height: 1.4 !important;
+  max-width: 360px !important;
+  word-break: break-word !important;
+}
+
+:deep(.light-tooltip-popover .n-popover-arrow) {
+  background-color: #ffffff !important;
+  border-color: rgba(60, 60, 67, 0.14) !important;
 }
 </style>

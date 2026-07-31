@@ -356,6 +356,7 @@ async function loadDashboard(trigger?: 'page' | 'refresh' | 'list' | 'poll') {
     servers.value = statsRes.data.servers || [];
     recentHistory.value = statsRes.data.recent_history || [];
     plans.value = plansRes.data || [];
+    checkAndTogglePolling();
     if (trigger === 'refresh' || trigger === 'list') {
       message.success('刷新成功');
     }
@@ -502,20 +503,52 @@ function handleSelectAction(key: string, plan: ReleasePlan) {
   else if (key === 'delete') deletePlan(plan);
 }
 
-let pollTimer: any = null;
+import { wsService } from '../../utils/websocket';
 
-onMounted(() => {
-  loadDashboard();
-  // Silently refresh the dashboard every 4 seconds
-  pollTimer = setInterval(() => {
+let updateTimer: any = null;
+let pollIntervalTimer: any = null;
+
+function hasActivePlans(): boolean {
+  if (!plans.value || !plans.value.length) return false;
+  return plans.value.some((p: any) => ['RUNNING', 'QUEUED', 'BUILDING', 'WAITING'].includes(p.status));
+}
+
+function checkAndTogglePolling() {
+  if (hasActivePlans()) {
+    if (!pollIntervalTimer) {
+      pollIntervalTimer = setInterval(() => {
+        loadDashboard('poll');
+      }, 3000);
+    }
+  } else {
+    stopPolling();
+  }
+}
+
+function stopPolling() {
+  if (pollIntervalTimer) {
+    clearInterval(pollIntervalTimer);
+    pollIntervalTimer = null;
+  }
+}
+
+function handleDashboardUpdate() {
+  if (updateTimer) clearTimeout(updateTimer);
+  updateTimer = setTimeout(() => {
     loadDashboard('poll');
-  }, 4000);
+  }, 200);
+}
+
+onMounted(async () => {
+  await loadDashboard();
+  checkAndTogglePolling();
+  wsService.on('RELEASE_UPDATE', handleDashboardUpdate);
 });
 
 onUnmounted(() => {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-  }
+  stopPolling();
+  if (updateTimer) clearTimeout(updateTimer);
+  wsService.off('RELEASE_UPDATE', handleDashboardUpdate);
 });
 </script>
 

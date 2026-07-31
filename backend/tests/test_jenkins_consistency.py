@@ -126,7 +126,7 @@ def test_reconcile_leaves_queue_unresolved_without_exact_queue_id():
     assert release_service.resolve_task_build_number(db, task, client) is None
     assert task.status == "QUEUED"
     assert task.build_number is None
-    assert "queue" in task.error_message.lower()
+    assert "queue" in task.error_message.lower() or "排队" in task.error_message
 
 
 def test_reconcile_uses_queue_executable_without_recent_build_scan():

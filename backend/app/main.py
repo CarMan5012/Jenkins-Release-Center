@@ -16,6 +16,7 @@ from app.api.jenkins import router as jenkins_router
 from app.api.release import router as release_router
 from app.api.history import router as history_router
 from app.api.system import router as system_router
+from app.api.ws import router as ws_router
 
 # Setup logger configuration
 setup_logger()
@@ -59,6 +60,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to start self-healing on startup: {str(e)}")
         
+    # Bind main asyncio loop to ws_manager for thread-safe broadcasting
+    import asyncio
+    from app.core.ws_manager import manager
+    try:
+        manager.set_loop(asyncio.get_running_loop())
+    except Exception as e:
+        logger.warning(f"Failed to set ws_manager main loop: {e}")
+
     yield
     
     # 2. Shutdown phase
@@ -81,17 +90,27 @@ app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)
 
 # Register routes with tags for auto OpenAPI Swagger documentation
-base_prefix = "" if settings.BASE_PATH == "/" else settings.BASE_PATH
+from fastapi.responses import FileResponse, RedirectResponse
+
+@app.get("/", include_in_schema=False)
+def root_redirect():
+    if settings.BASE_PATH and settings.BASE_PATH != "/":
+        target = settings.BASE_PATH if settings.BASE_PATH.endswith("/") else f"{settings.BASE_PATH}/"
+        return RedirectResponse(url=target)
+    return {"status": "ok"}
 
 @app.get("/health", tags=["Health Check"])
 def health_check():
     return {"status": "ok", "base_path": settings.BASE_PATH}
+
+base_prefix = settings.BASE_PATH if settings.BASE_PATH and settings.BASE_PATH != "/" else ""
 
 app.include_router(auth_router, prefix=f"{base_prefix}{settings.API_V1_STR}/auth", tags=["Authentication"])
 app.include_router(jenkins_router, prefix=f"{base_prefix}{settings.API_V1_STR}/jenkins", tags=["Jenkins Integration"])
 app.include_router(release_router, prefix=f"{base_prefix}{settings.API_V1_STR}/release", tags=["Release Management"])
 app.include_router(history_router, prefix=f"{base_prefix}{settings.API_V1_STR}/history", tags=["Execution Logs & History"])
 app.include_router(system_router, prefix=f"{base_prefix}{settings.API_V1_STR}/system", tags=["System Settings & Dashboard"])
+app.include_router(ws_router, prefix=f"{base_prefix}{settings.API_V1_STR}", tags=["WebSocket Realtime"])
 
 # ==========================================
 # Vue Single Page Application Fallback Routing

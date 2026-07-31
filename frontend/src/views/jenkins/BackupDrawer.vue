@@ -349,6 +349,7 @@ import {
   useMessage,
 } from 'naive-ui';
 import request from '../../utils/request';
+import { wsService } from '../../utils/websocket';
 import { formatDateTime } from '../../utils/release-ui';
 import {
   credentialCopyText,
@@ -443,14 +444,7 @@ async function triggerNewBackup() {
     await request.post(`/jenkins/servers/${props.server.id}/backups`);
     message.success('备份任务已提交后台执行，请稍后刷新列表');
     await fetchBackups();
-    let count = 0;
-    const interval = window.setInterval(async () => {
-      await fetchBackups(true);
-      count++;
-      if (!backups.value.some((backup) => backup.status === 'BACKUPING') || count > 15) {
-        window.clearInterval(interval);
-      }
-    }, 2000);
+    wsService.on('BACKUP_UPDATE', () => fetchBackups(true));
   } catch (err: any) {
     message.error(err.message || '触发备份失败');
   } finally {

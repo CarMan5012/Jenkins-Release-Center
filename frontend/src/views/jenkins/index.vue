@@ -244,39 +244,25 @@ function openBackupDrawer(server: JenkinsServer) {
   backupDrawerVisible.value = true;
 }
 
-// 同步状态轮询管理
+import { wsService } from '../../utils/websocket';
+
+// 同步状态管理
 const syncingServers = ref<Record<number, boolean>>({});
 
+function handleSyncUpdate(data: any) {
+  if (data && data.server_id) {
+    delete syncingServers.value[data.server_id];
+    if (selectedServerId.value === data.server_id) {
+      selectServer(data.server_id);
+    }
+    message.success('数据同步已完成');
+  }
+}
+
 function pollSyncStatus(serverId: number) {
-  if (syncingServers.value[serverId]) return; // 避免重复拉起轮询
   syncingServers.value[serverId] = true;
-  
-  let attempts = 0;
-  const maxAttempts = 30; // 最多轮询 60 秒
-  const interval = setInterval(async () => {
-    attempts++;
-    try {
-      const res = await request.get(`/jenkins/servers/${serverId}/sync/status`);
-      if (!res.data.syncing) {
-        clearInterval(interval);
-        delete syncingServers.value[serverId];
-        // 如果轮询结束时该服务器依然被选中，则更新其视图数据
-        if (selectedServerId.value === serverId) {
-          await selectServer(serverId);
-        }
-        message.success('数据同步已完成');
-      }
-    } catch (err) {
-      clearInterval(interval);
-      delete syncingServers.value[serverId];
-    }
-    
-    if (attempts >= maxAttempts) {
-      clearInterval(interval);
-      delete syncingServers.value[serverId];
-      message.warning('同步已在后台处理，请稍后刷新查看');
-    }
-  }, 2000);
+  // 注册 WS 监听
+  wsService.on('SYNC_UPDATE', handleSyncUpdate);
 }
 
 async function checkAndResumeSyncPolling(serverId: number) {

@@ -20,7 +20,15 @@ except ImportError:
 db_type = os.getenv("DB_TYPE", "sqlite").lower()
 
 if db_type == "sqlite":
-    db_path = os.getenv("SQLITE_PATH", "/app/data/release-center.db")
+    default_db_path = "data/release-center.db" if os.getenv("APP_ENV") == "development" else "/app/data/release-center.db"
+    db_path = os.getenv("SQLITE_PATH", default_db_path)
+    
+    db_dir = os.path.dirname(db_path)
+    if db_dir and not os.path.exists(db_dir):
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"Could not create SQLite directory {db_dir}: {e}")
     
     # 1. Plaintext SQLite database check
     if os.path.exists(db_path):

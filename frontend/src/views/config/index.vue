@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h1>系统配置</h1>
-        <p>通知渠道和安全审计记录。</p>
+        <p>通知渠道、安全审计、自动任务与高级配置。</p>
       </div>
     </div>
 
@@ -71,7 +71,7 @@
                   <td>{{ log.username }}</td>
                   <td><n-tag size="small" :bordered="false">{{ translateAction(log.action) }}</n-tag></td>
                   <td class="mono">{{ log.ip_address || 'unknown' }}</td>
-                  <td>{{ translateDetails(log.action, log.details) }}</td>
+                  <td>{{ translateDetails(log.action, log.details || undefined) }}</td>
                   <td class="mono">{{ formatDateTime(log.created_at) }}</td>
                 </tr>
                 <tr v-if="!auditLogs.length">
@@ -86,7 +86,112 @@
         </section>
       </n-tab-pane>
 
+      <n-tab-pane name="tasks" tab="自动任务">
+        <!-- 后台定时任务与数据存储说明卡片 -->
+        <section class="panel" style="margin-bottom: 20px;">
+          <div class="panel__header" style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <h2 class="panel__title">后台自动任务与运行状态</h2>
+            </div>
+            <RefreshButton secondary size="small" label="刷新调度状态" :loading="schedulerLoading" @click="loadSchedulerInfo" />
+          </div>
+
+          <div v-if="schedulerLoading && !schedulerInfo" style="padding: 24px;">
+            <n-skeleton text :repeat="6" />
+          </div>
+          <div v-else-if="schedulerInfo" style="padding: 20px 24px; display: grid; gap: 20px;">
+            
+            <!-- 引擎概况与存储状态卡片 -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px;">
+              <div class="info-metric-card">
+                <div class="muted text-xs">后台调度服务</div>
+                <div style="margin-top: 6px; display: flex; align-items: center; gap: 8px;">
+                  <n-tag size="small" type="success" :bordered="false">● 正常运行</n-tag>
+                </div>
+                <div class="muted text-xs" style="margin-top: 4px;">已接管全量后台自动任务</div>
+              </div>
+
+              <div class="info-metric-card">
+                <div class="muted text-xs">系统数据库存储</div>
+                <div style="margin-top: 6px; font-size: 18px; font-weight: 700;" class="mono primary-color">
+                  {{ schedulerInfo.storage_summary?.db_size }}
+                </div>
+                <div class="muted text-xs" style="margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="schedulerInfo.storage_summary?.db_file_path">
+                  路径: {{ schedulerInfo.storage_summary?.db_file_path }}
+                </div>
+              </div>
+
+              <div class="info-metric-card">
+                <div class="muted text-xs">Jenkins 配置备份</div>
+                <div style="margin-top: 6px; font-size: 16px; font-weight: 700;" class="mono">
+                  {{ schedulerInfo.storage_summary?.server_count || 0 }} 实例 / {{ schedulerInfo.storage_summary?.backup_count || 0 }} 份备份
+                </div>
+                <div class="muted text-xs" style="margin-top: 4px;">
+                  占用空间: <strong class="mono">{{ schedulerInfo.storage_summary?.backup_total_size || '0 B' }}</strong> (最新: {{ schedulerInfo.storage_summary?.latest_backup_at || '暂无备份点' }})
+                </div>
+              </div>
+            </div>
+
+            <!-- 常驻系统定时任务表格 -->
+            <div>
+              <h4 style="font-size: 13.5px; font-weight: 600; margin: 0 0 10px 0;">系统常驻后台自动任务</h4>
+              <div class="table-wrap">
+                <table class="ops-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">任务名称与说明</th>
+                      <th scope="col">触发频率与时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="task in schedulerInfo.system_cron_tasks" :key="task.job_id">
+                      <td>
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                          <span style="font-weight: 600;">{{ task.name }}</span>
+                          <n-tooltip trigger="hover" placement="top">
+                            <template #trigger>
+                              <span class="task-help-badge">?</span>
+                            </template>
+                            {{ task.description }}
+                          </n-tooltip>
+                        </div>
+                      </td>
+                      <td class="mono text-xs">{{ task.trigger_desc }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- 动态发布排期任务列表 (若有) -->
+            <div v-if="schedulerInfo.release_scheduled_jobs && schedulerInfo.release_scheduled_jobs.length">
+              <h4 style="font-size: 13.5px; font-weight: 600; margin: 0 0 10px 0;">已预约的定时发布任务</h4>
+              <div class="table-wrap">
+                <table class="ops-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">关联发布计划</th>
+                      <th scope="col">预计触发时间</th>
+                      <th scope="col">错失宽限时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="job in schedulerInfo.release_scheduled_jobs" :key="job.job_id">
+                      <td><strong>{{ job.plan_name }}</strong> <span class="muted mono text-xs">(Plan #{{ job.plan_id }})</span></td>
+                      <td class="mono text-xs">{{ job.next_run_time }}</td>
+                      <td class="mono text-xs">{{ job.misfire_grace_time }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+          </div>
+        </section>
+      </n-tab-pane>
+
       <n-tab-pane name="advanced" tab="高级配置">
+
         <section class="panel">
           <div class="panel__header">
             <h2 class="panel__title">高级策略与基础设置</h2>
@@ -414,6 +519,20 @@ const auditPage = ref(1);
 const auditLimit = 20;
 const notifyModalVisible = ref(false);
 const editingNotifyId = ref<number | null>(null);
+const schedulerLoading = ref(false);
+const schedulerInfo = ref<any>(null);
+
+async function loadSchedulerInfo() {
+  schedulerLoading.value = true;
+  try {
+    const res = await request.get('/system/scheduler-info');
+    schedulerInfo.value = res.data;
+  } catch (e: any) {
+    message.error(e.message || '加载调度任务状态失败');
+  } finally {
+    schedulerLoading.value = false;
+  }
+}
 
 const notifyForm = ref({
   name: '',
@@ -488,6 +607,80 @@ async function loadAuditLogs(resetPage = false) {
     }
     auditLoading.value = false;
   }
+}
+
+function translateAction(action: string) {
+  if (!action) return '未知操作';
+  const actionMap: Record<string, string> = {
+    'LOGIN': '系统登录',
+    'LOGOUT': '退出登录',
+    'CREATE_RELEASE_PLAN': '创建发布计划',
+    'UPDATE_RELEASE_PLAN': '更新发布计划',
+    'DELETE_RELEASE_PLAN': '删除发布计划',
+    'CANCEL_RELEASE_PLAN': '取消发布计划',
+    'TRIGGER_RELEASE_PLAN': '手动触发发布',
+    'RETRY_RELEASE_PLAN': '重试整单发布',
+    'RETRY_SINGLE_TASK': '重试单项构建',
+    'IDEMPOTENCY_CONFLICT': '重复请求拦截',
+
+    'CREATE_JENKINS_SERVER': '添加 Jenkins 实例',
+    'UPDATE_JENKINS_SERVER': '更新 Jenkins 实例',
+    'DELETE_JENKINS_SERVER': '删除 Jenkins 实例',
+    'SYNC_JENKINS': '手动同步 Jenkins 任务',
+    'RUN_JENKINS_JOB_DIRECTLY': '直接触发 Job 构建',
+
+    'CREATE_BACKUP': '创建配置备份',
+    'VIEW_BACKUP_DETAILS': '查看备份详情',
+    'DOWNLOAD_BACKUP': '下载加密备份',
+    'DELETE_BACKUP': '删除配置备份',
+
+    'CREATE_NOTIFY_CONFIG': '新增通知渠道',
+    'UPDATE_NOTIFY_CONFIG': '更新通知渠道',
+    'DELETE_NOTIFY_CONFIG': '删除通知渠道',
+    'TEST_NOTIFY_CONFIG': '测试通知渠道',
+
+    'SET_SYSTEM_CONFIG': '变更高级配置项',
+    'RESET_SEQUENCE': '重置历史记录 ID',
+  };
+
+  return actionMap[action.toUpperCase()] || action;
+}
+
+function translateDetails(_action: string, details?: string) {
+  if (!details) return '-';
+  
+  let result = details;
+
+  result = result
+    .replace(/^User\s+(.*?)\s+successfully logged in\.?/i, '用户 $1 成功登录系统')
+    .replace(/^User\s+(.*?)\s+successfully logged out\.?/i, '用户 $1 成功退出系统')
+    .replace(/^Created Notification Channel\s*/i, '创建通知渠道: ')
+    .replace(/^Updated Notification Channel\s*/i, '更新通知渠道: ')
+    .replace(/^Deleted Notification Channel\s*/i, '删除通知渠道: ')
+    .replace(/^Sent Test Notification to Channel\s*/i, '测试发送通知渠道: ')
+    .replace(/^Configured System key:\s*/i, '修改系统配置项: ')
+    .replace(/^Idempotency conflict for plan creation key\s*/i, '重复触发发布计划: ')
+    .replace(/^Created release plan:\s*/i, '创建发布计划: ')
+    .replace(/^Cancelled release plan:\s*/i, '取消发布计划: ')
+    .replace(/^Triggered release plan early:\s*/i, '提前触发发布计划: ')
+    .replace(/^Retried release plan in-place:\s*/i, '重新发起发布计划: ')
+    .replace(/^Retried single task\s*/i, '重试单项构建: ')
+    .replace(/^Deleted release plan ID:\s*/i, '删除发布计划 ID: ')
+    .replace(/^Updated release plan:\s*/i, '更新发布计划: ')
+    .replace(/^Created Jenkins Server\s*/i, '添加 Jenkins 实例: ')
+    .replace(/^Updated Jenkins Server\s*/i, '更新 Jenkins 实例: ')
+    .replace(/^Deleted Jenkins Server\s*/i, '删除 Jenkins 实例: ')
+    .replace(/^and all its dependencies\s*/i, '及其全部依赖数据')
+    .replace(/^Triggered background Views\/Jobs sync for server\s*/i, '手动触发任务同步: ')
+    .replace(/^Directly triggered job\s*/i, '手动直接触发构建: ')
+    .replace(/^Created backup task\s*/i, '创建配置备份: ')
+    .replace(/^Viewed backup details for backup\s*/i, '查看备份详情: ')
+    .replace(/^Downloaded encrypted backup\s*/i, '下载加密备份包: ')
+    .replace(/^Deleted backup\s*/i, '删除配置备份: ')
+    .replace(/for server/gi, '（实例：')
+    .replace(/in plan/gi, '，所属计划：');
+
+  return result;
 }
 
 function openNotifyModal(item?: NotifyConfig) {
@@ -639,6 +832,7 @@ async function loadSystemConfigs() {
     
     const sysUrl = configs.find((c: any) => c.config_key === 'system_url');
     systemUrl.value = sysUrl ? sysUrl.config_value : '';
+    await loadSchedulerInfo();
   } catch (err: any) {
     message.error(err.message || '加载系统配置失败');
   }
@@ -709,121 +903,6 @@ onMounted(() => {
   loadAuditLogs();
   loadSystemConfigs();
 });
-
-const actionMap: Record<string, string> = {
-  'LOGIN': '登录',
-  'LOGOUT': '退出登录',
-  'CREATE_JENKINS_SERVER': '创建 Jenkins 服务',
-  'UPDATE_JENKINS_SERVER': '更新 Jenkins 服务',
-  'DELETE_JENKINS_SERVER': '删除 Jenkins 服务',
-  'SYNC_JENKINS': '同步 Jenkins 视图',
-  'IDEMPOTENCY_CONFLICT': '幂等性冲突',
-  'CREATE_BACKUP': '创建备份任务',
-  'VIEW_BACKUP_DETAILS': '查看备份详情',
-  'DOWNLOAD_BACKUP': '下载备份文件',
-  'CREATE_RELEASE_PLAN': '创建发布计划',
-  'CANCEL_RELEASE_PLAN': '取消发布计划',
-  'TRIGGER_RELEASE_PLAN': '手动触发发布',
-  'DELETE_RELEASE_PLAN': '删除发布计划',
-  'UPDATE_RELEASE_PLAN': '更新发布计划',
-  'CREATE_NOTIFY_CONFIG': '创建通知渠道',
-  'UPDATE_NOTIFY_CONFIG': '更新通知渠道',
-  'DELETE_NOTIFY_CONFIG': '删除通知渠道',
-  'TEST_NOTIFY_CONFIG': '测试通知渠道',
-  'SET_SYSTEM_CONFIG': '配置系统参数'
-};
-
-function translateAction(action: string): string {
-  return actionMap[action] || action;
-}
-
-function translateDetails(action: string, details: string | null | undefined): string {
-  if (!details) return '-';
-  
-  if (action === 'LOGIN') {
-    if (details.includes('Logged in')) return '登录成功';
-    if (details.includes('Login failed')) return '登录失败';
-  }
-  
-  if (action === 'CREATE_JENKINS_SERVER') {
-    const match = details.match(/Created Jenkins Server (.+)/);
-    if (match) return `创建 Jenkins 服务: ${match[1]}`;
-  }
-  if (action === 'UPDATE_JENKINS_SERVER') {
-    const match = details.match(/Updated Jenkins Server (.+)/);
-    if (match) return `更新 Jenkins 服务: ${match[1]}`;
-  }
-  if (action === 'DELETE_JENKINS_SERVER') {
-    const match = details.match(/Deleted Jenkins Server (.+)/);
-    if (match) return `删除 Jenkins 服务: ${match[1]}`;
-  }
-  if (action === 'SYNC_JENKINS') {
-    const match = details.match(/Synced Views\/Jobs for server (.+)/);
-    if (match) return `同步服务 ${match[1]} 的视图与任务`;
-  }
-  
-  if (action === 'CREATE_BACKUP') {
-    const match = details.match(/Created backup task (\d+) for server (.+)/);
-    if (match) return `为服务 ID ${match[2]} 创建备份任务 #${match[1]}`;
-  }
-  if (action === 'VIEW_BACKUP_DETAILS') {
-    const match = details.match(/Viewed backup details for backup (.+) on server (.+)/);
-    if (match) return `查看服务 ID ${match[2]} 的备份 #${match[1]} 详情`;
-  }
-  if (action === 'DOWNLOAD_BACKUP') {
-    const match = details.match(/Downloaded encrypted backup (.+) for server (.+)/);
-    if (match) return `下载服务 ID ${match[2]} 的加密备份 #${match[1]}`;
-  }
-  
-  if (action === 'CREATE_RELEASE_PLAN') {
-    const match = details.match(/Created release plan:\s*(.+)/);
-    if (match) return `创建发布计划: ${match[1]}`;
-  }
-  if (action === 'CANCEL_RELEASE_PLAN') {
-    const match = details.match(/Cancelled release plan:\s*(.+)/);
-    if (match) return `取消发布计划: ${match[1]}`;
-  }
-  if (action === 'TRIGGER_RELEASE_PLAN') {
-    const match = details.match(/Triggered release plan early:\s*(.+)/);
-    if (match) return `提前触发发布计划: ${match[1]}`;
-  }
-  if (action === 'DELETE_RELEASE_PLAN') {
-    const match = details.match(/Deleted release plan ID:\s*(.+)/);
-    if (match) return `删除发布计划 ID: ${match[1]}`;
-  }
-  if (action === 'UPDATE_RELEASE_PLAN') {
-    const match = details.match(/Updated release plan:\s*(.+)/);
-    if (match) return `更新发布计划: ${match[1]}`;
-  }
-  
-  if (action === 'CREATE_NOTIFY_CONFIG') {
-    const match = details.match(/Created Notification Channel (.+)/);
-    if (match) return `创建通知渠道: ${match[1]}`;
-  }
-  if (action === 'UPDATE_NOTIFY_CONFIG') {
-    const match = details.match(/Updated Notification Channel (.+)/);
-    if (match) return `更新通知渠道: ${match[1]}`;
-  }
-  if (action === 'DELETE_NOTIFY_CONFIG') {
-    const match = details.match(/Deleted Notification Channel (.+)/);
-    if (match) return `删除通知渠道: ${match[1]}`;
-  }
-  if (action === 'TEST_NOTIFY_CONFIG') {
-    const match = details.match(/Sent Test Notification to Channel (.+)/);
-    if (match) return `向通知渠道 ${match[1]} 发送测试消息`;
-  }
-  
-  if (action === 'SET_SYSTEM_CONFIG') {
-    const match = details.match(/Configured System key:\s*(.+)/);
-    if (match) return `配置系统参数项: ${match[1]}`;
-  }
-
-  if (action === 'RESET_HISTORY_SEQUENCE') {
-    return '清空所有历史记录并归零 ID 序号';
-  }
-  
-  return details;
-}
 </script>
 
 <style scoped>
@@ -965,8 +1044,37 @@ function translateDetails(action: string, details: string | null | undefined): s
   margin: 14px 16px;
 }
 
+.task-help-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted, #9ca3af);
+  border: 1px solid var(--line-soft, #d1d5db);
+  border-radius: 50%;
+  cursor: help;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.task-help-badge:hover {
+  color: var(--primary-color, #2563eb);
+  border-color: var(--primary-color, #2563eb);
+  background: rgba(37, 99, 235, 0.08);
+}
+
 .skeleton-block {
   padding: 20px;
+}
+
+.info-metric-card {
+  padding: 14px 16px;
+  background: var(--bg-card, #ffffff);
+  border: 1px solid var(--line-soft, rgba(60, 60, 67, 0.12));
+  border-radius: 10px;
 }
 
 .channel-grid {

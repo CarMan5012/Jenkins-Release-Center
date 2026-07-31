@@ -48,6 +48,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import { NAlert, NSkeleton, NTag } from 'naive-ui';
 import RefreshButton from './RefreshButton.vue';
 import request from '../utils/request';
+import { wsService } from '../utils/websocket';
 
 const props = withDefaults(defineProps<{
   taskId?: number | null;
@@ -70,25 +71,43 @@ const manualRefreshing = ref(false);
 const error = ref('');
 const hasMore = ref(false);
 let offset = 0;
-let poller: ReturnType<typeof setTimeout> | null = null;
+let isFetching = false;
+let pollTimer: any = null;
 
 const lines = computed(() => logBuffer.value ? logBuffer.value.split(/\r?\n/) : []);
 
-function clearPoller() {
-  if (poller) {
-    clearTimeout(poller);
-    poller = null;
+function stopPolling() {
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function scheduleNextFetch() {
+  stopPolling();
+  if (hasMore.value && (props.taskId || props.historyId)) {
+    pollTimer = setTimeout(() => {
+      fetchLogsChunk();
+    }, 1500);
   }
 }
 
 async function scrollToBottom() {
   await nextTick();
-  if (terminalRef.value) terminalRef.value.scrollTop = terminalRef.value.scrollHeight;
+  if (terminalRef.value) {
+    terminalRef.value.scrollTop = terminalRef.value.scrollHeight;
+  }
 }
 
-async function pollLogs() {
-  if (!props.taskId && !props.historyId) return;
-  loading.value = true;
+async function fetchLogsChunk() {
+  if ((!props.taskId && !props.historyId) || isFetching) return;
+  
+  const wasAtBottom = terminalRef.value
+    ? (terminalRef.value.scrollHeight - terminalRef.value.scrollTop - terminalRef.value.clientHeight < 60)
+    : true;
+
+  isFetching = true;
+  loading.value = offset === 0;
   error.value = '';
   try {
     const url = props.historyId 
@@ -98,25 +117,37 @@ async function pollLogs() {
       params: { start: offset },
     });
     const data = res.data;
-    logBuffer.value = offset === 0 ? data.log_text : `${logBuffer.value}${data.log_text}`;
+    if (data.log_text) {
+      logBuffer.value = offset === 0 ? data.log_text : `${logBuffer.value}${data.log_text}`;
+    }
     offset = data.next_start;
-    hasMore.value = data.has_more;
-    await scrollToBottom();
-    if (data.has_more) poller = setTimeout(pollLogs, 2000);
+    hasMore.value = Boolean(data.has_more);
+    
+    if (wasAtBottom) {
+      await scrollToBottom();
+    }
   } catch (err: any) {
     error.value = err.message || '日志加载失败。';
     hasMore.value = false;
   } finally {
     loading.value = false;
+    isFetching = false;
+    scheduleNextFetch();
   }
 }
 
+function handleLogUpdate() {
+  fetchLogsChunk();
+}
+
 async function restart() {
-  clearPoller();
+  stopPolling();
   offset = 0;
   logBuffer.value = '';
-  hasMore.value = false;
-  if (props.taskId || props.historyId) await pollLogs();
+  hasMore.value = true;
+  if (props.taskId || props.historyId) {
+    await fetchLogsChunk();
+  }
 }
 
 async function refresh() {
@@ -143,7 +174,14 @@ watch([() => props.taskId, () => props.historyId], () => {
   void restart();
 }, { immediate: props.auto });
 
-onUnmounted(clearPoller);
+wsService.on('RELEASE_UPDATE', handleLogUpdate);
+wsService.on('LOG_UPDATE', handleLogUpdate);
+
+onUnmounted(() => {
+  stopPolling();
+  wsService.off('RELEASE_UPDATE', handleLogUpdate);
+  wsService.off('LOG_UPDATE', handleLogUpdate);
+});
 </script>
 
 <style scoped>
