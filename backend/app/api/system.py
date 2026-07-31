@@ -372,7 +372,26 @@ def get_scheduler_info(
     now_ts = datetime.now().timestamp()
     if not force_refresh and _SCHEDULER_INFO_CACHE["data"] and (now_ts - _SCHEDULER_INFO_CACHE["timestamp"] < 5):
         return _SCHEDULER_INFO_CACHE["data"]
-        
+
+    system_task_meta = {
+        "reconcile_running_tasks": {
+            "name": "构建卡顿与掉线自愈巡检",
+            "description": "实时监控构建任务，发现异常停滞或掉线时自动恢复"
+        },
+        "auto_backup_jenkins_servers": {
+            "name": "Jenkins 实例配置自动定时备份",
+            "description": "自动对所有启用中的 Jenkins 实例进行配置文件加密打包归档"
+        },
+        "clean_expired_data": {
+            "name": "过期日志与旧备份自动清理",
+            "description": "按系统保留策略定期清除过期的历史日志与旧备份文件"
+        },
+        "sync_external_builds": {
+            "name": "外部 Jenkins 构建记录历史同步",
+            "description": "自动同步并补充 Jenkins 侧外部独立触发的历史构建数据"
+        }
+    }
+
     try:
         from app.services.scheduler import scheduler_manager
         scheduler = getattr(scheduler_manager, "scheduler", None)
@@ -380,239 +399,75 @@ def get_scheduler_info(
     except Exception:
         scheduler = None
         is_running = True
-        
-        system_task_meta = {
-            "reconcile_running_tasks": {
-                "name": "构建卡顿与掉线自愈巡检",
-                "description": "实时监控构建任务，发现异常停滞或掉线时自动恢复"
-            },
-            "auto_backup_jenkins_servers": {
-                "name": "Jenkins 实例配置自动定时备份",
-                "description": "自动对所有启用中的 Jenkins 实例进行配置文件加密打包归档"
-            },
-            "clean_expired_data": {
-                "name": "过期日志与旧备份自动清理",
-                "description": "按系统保留策略定期清除过期的历史日志与旧备份文件"
-            },
-            "sync_external_builds": {
-                "name": "外部 Jenkins 构建记录历史同步",
-                "description": "自动同步并补充 Jenkins 侧外部独立触发的历史构建数据"
-            }
-        }
-        
-        all_jobs = scheduler.get_jobs() if is_running else []
-        
-        system_cron_tasks = []
-        release_scheduled_jobs = []
-        
-        for job in all_jobs:
-            job_id = job.id
-            next_run = "暂无排期"
-            if getattr(job, "next_run_time", None):
-                try:
-                    next_run = job.next_run_time.strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    next_run = str(job.next_run_time)
-            
-            trigger_desc = format_trigger(getattr(job, "trigger", None))
-            
-            if job_id in system_task_meta:
-                meta = system_task_meta[job_id]
-                system_cron_tasks.append({
-                    "job_id": job_id,
-                    "name": meta["name"],
-                    "trigger_desc": trigger_desc,
-                    "description": meta["description"],
-                    "next_run_time": next_run,
-                    "status": "正常运行" if is_running else "已停止"
-                })
-            elif job_id.startswith("plan_"):
-                parts = job_id.split("_")
-                plan_id = parts[1] if len(parts) > 1 else "?"
-                task_id = parts[3] if len(parts) > 3 else "?"
-                
-                plan_name = "未命名计划"
-                try:
-                    plan = db.get(ReleasePlan, int(plan_id))
-                    if plan:
-                        plan_name = plan.name
-                except Exception:
-                    pass
-                    
-                release_scheduled_jobs.append({
-                    "job_id": job_id,
-                    "plan_id": plan_id,
-                    "task_id": task_id,
-                    "plan_name": plan_name,
-                    "trigger_desc": trigger_desc,
-                    "next_run_time": next_run,
-                    "misfire_grace_time": f"{job.misfire_grace_time} 秒" if hasattr(job, "misfire_grace_time") and job.misfire_grace_time else "300 秒"
-                })
 
-        from datetime import datetime, timedelta
-
-        def calculate_next_run(job_id: str) -> str:
-            now = datetime.now()
-            if job_id == "reconcile_running_tasks":
-                return (now + timedelta(seconds=10)).strftime("%Y-%m-%d %H:%M:%S")
-            elif job_id == "auto_backup_jenkins_servers":
-                target = now.replace(hour=2, minute=0, second=0, microsecond=0)
-                if target <= now:
-                    target += timedelta(days=1)
-                return target.strftime("%Y-%m-%d %H:%M:%S")
-            elif job_id == "clean_expired_data":
-                target = now.replace(hour=3, minute=0, second=0, microsecond=0)
-                if target <= now:
-                    target += timedelta(days=1)
-                return target.strftime("%Y-%m-%d %H:%M:%S")
-            elif job_id == "sync_external_builds":
-                target = now.replace(hour=18, minute=0, second=0, microsecond=0)
-                if target <= now:
-                    target += timedelta(days=1)
-                return target.strftime("%Y-%m-%d %H:%M:%S")
-            return "定时自动调度中"
-
-        known_system_ids = set(t["job_id"] for t in system_cron_tasks)
-        for sys_id, meta in system_task_meta.items():
-            if sys_id not in known_system_ids:
-                registered_job = scheduler.get_job(sys_id) if (scheduler and hasattr(scheduler, "get_job")) else None
-                dynamic_trigger_desc = "常规自动调度"
-                next_run_str = calculate_next_run(sys_id)
-                
-                if registered_job:
-                    if getattr(registered_job, "trigger", None):
-                        dynamic_trigger_desc = format_trigger(registered_job.trigger)
-                    if getattr(registered_job, "next_run_time", None):
-                        try:
-                            next_run_str = registered_job.next_run_time.strftime("%Y-%m-%d %H:%M:%S")
-                        except Exception:
-                            pass
-                    
-                system_cron_tasks.append({
-                    "job_id": sys_id,
-                    "name": meta["name"],
-                    "trigger_desc": dynamic_trigger_desc,
-                    "description": meta["description"],
-                    "next_run_time": next_run_str,
-                    "status": "正常运行"
-                })
-
-        possible_db_paths = [
-            os.getenv("SQLITE_PATH", ""),
-            "data/release-center.db",
-            "data/release_center.db",
-            "release-center.db",
-            "release_center.db",
-            "/app/data/release-center.db",
-            "/app/data/release_center.db"
-        ]
-        
-        actual_db_path = "data/release-center.db"
-        db_size_bytes = 0
-        for p in possible_db_paths:
-            if p and os.path.exists(p):
-                try:
-                    size = os.path.getsize(p)
-                    actual_db_path = os.path.abspath(p)
-                    if size > 0:
-                        db_size_bytes = size
-                        break
-                except Exception:
-                    pass
-        
-        server_count = 0
-        backup_records = []
+    all_jobs = []
+    if scheduler and is_running:
         try:
-            server_count = db.query(JenkinsServer).count()
-            backup_records = db.query(JenkinsBackup).all()
-        except Exception as query_err:
-            from loguru import logger
-            logger.warning(f"Could not query DB stats: {query_err}")
-            
-        backup_count = len(backup_records)
-        backup_bytes_total = 0
-        latest_backup_time = None
-        
-        for b in backup_records:
-            path = getattr(b, "zip_path", None)
-            possible_b_paths = []
-            if path:
-                possible_b_paths.extend([
-                    path,
-                    os.path.abspath(path),
-                    os.path.join(os.getcwd(), path)
-                ])
-            
-            # 补全按规范生成的默认存放路径
-            b_id = getattr(b, "id", None)
-            s_id = getattr(b, "server_id", None)
-            if b_id and s_id:
-                rel_std = os.path.join("data", "backups", f"server_{s_id}", f"backup_{b_id}.zip.enc")
-                possible_b_paths.extend([
-                    rel_std,
-                    os.path.abspath(rel_std),
-                    os.path.join(os.getcwd(), rel_std),
-                    f"/app/data/backups/server_{s_id}/backup_{b_id}.zip.enc"
-                ])
+            all_jobs = scheduler.get_jobs()
+        except Exception:
+            all_jobs = []
 
-            for bp in possible_b_paths:
-                if bp and os.path.exists(bp):
-                    try:
-                        f_sz = os.path.getsize(bp)
-                        if f_sz > 0:
-                            backup_bytes_total += f_sz
-                            break
-                    except Exception:
-                        pass
-
-            if getattr(b, "backup_time", None):
-                if latest_backup_time is None or b.backup_time > latest_backup_time:
-                    latest_backup_time = b.backup_time
-
-        latest_str = "暂无备份点"
-        if latest_backup_time:
+    system_cron_tasks = []
+    release_scheduled_jobs = []
+    
+    for job in all_jobs:
+        job_id = getattr(job, "id", "")
+        next_run = "暂无排期"
+        if getattr(job, "next_run_time", None):
             try:
-                latest_str = latest_backup_time.strftime("%Y-%m-%d %H:%M:%S")
+                next_run = job.next_run_time.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
-                latest_str = str(latest_backup_time)
-
-        res_data = {
-            "scheduler_summary": {
-                "status": "RUNNING",
-                "engine": "自动调度引擎",
-                "jobstore": "数据库持久化存储",
-                "total_jobs_count": len(all_jobs) or len(system_cron_tasks)
-            },
-            "system_cron_tasks": system_cron_tasks,
-            "release_scheduled_jobs": release_scheduled_jobs,
-            "storage_summary": {
-                "db_type": "SQLite 存储引擎",
-                "db_file_path": actual_db_path,
-                "db_size": format_file_size(db_size_bytes) if db_size_bytes > 0 else "已初始化 (低于 1KB)",
-                "server_count": server_count,
-                "backup_count": backup_count,
-                "backup_total_size": format_file_size(backup_bytes_total),
-                "latest_backup_at": latest_str
-            }
-        }
-        _SCHEDULER_INFO_CACHE["timestamp"] = now_ts
-        _SCHEDULER_INFO_CACHE["data"] = res_data
-        return res_data
-    except Exception as e:
-        from loguru import logger
-        logger.error(f"Error fetching scheduler info: {e}")
+                next_run = str(job.next_run_time)
         
-        fallback_tasks = []
-        for sys_id, meta in system_task_meta.items():
-            trig_desc = "常规自动调度"
+        trigger_desc = format_trigger(getattr(job, "trigger", None))
+        
+        if job_id in system_task_meta:
+            meta = system_task_meta[job_id]
+            system_cron_tasks.append({
+                "job_id": job_id,
+                "name": meta["name"],
+                "trigger_desc": trigger_desc,
+                "description": meta["description"],
+                "next_run_time": next_run,
+                "status": "正常运行" if is_running else "已停止"
+            })
+        elif job_id.startswith("plan_"):
+            parts = job_id.split("_")
+            plan_id = parts[1] if len(parts) > 1 else "?"
+            task_id = parts[3] if len(parts) > 3 else "?"
+            
+            plan_name = "未命名计划"
             try:
-                job_obj = scheduler_manager.scheduler.get_job(sys_id)
-                if job_obj and getattr(job_obj, "trigger", None):
-                    trig_desc = format_trigger(job_obj.trigger)
+                plan = db.get(ReleasePlan, int(plan_id))
+                if plan:
+                    plan_name = plan.name
             except Exception:
                 pass
+                
+            release_scheduled_jobs.append({
+                "job_id": job_id,
+                "plan_id": plan_id,
+                "task_id": task_id,
+                "plan_name": plan_name,
+                "trigger_desc": trigger_desc,
+                "next_run_time": next_run,
+                "misfire_grace_time": f"{getattr(job, 'misfire_grace_time', 300)} 秒"
+            })
 
-            fallback_tasks.append({
+    found_sys_ids = {t["job_id"] for t in system_cron_tasks}
+    for sys_id, meta in system_task_meta.items():
+        if sys_id not in found_sys_ids:
+            trig_desc = "常规自动调度"
+            if sys_id == "reconcile_running_tasks":
+                trig_desc = "每 10 秒自动巡检"
+            elif sys_id == "auto_backup_jenkins_servers":
+                trig_desc = "每天 02:00 自动执行"
+            elif sys_id == "clean_expired_data":
+                trig_desc = "每天 03:00 自动执行"
+            elif sys_id == "sync_external_builds":
+                trig_desc = "每天 18:00 自动执行"
+
+            system_cron_tasks.append({
                 "job_id": sys_id,
                 "name": meta["name"],
                 "trigger_desc": trig_desc,
@@ -621,22 +476,103 @@ def get_scheduler_info(
                 "status": "正常运行"
             })
 
-        return {
-            "scheduler_summary": {
-                "status": "RUNNING",
-                "engine": "自动调度引擎",
-                "jobstore": "数据库持久化存储",
-                "total_jobs_count": len(fallback_tasks)
-            },
-            "system_cron_tasks": fallback_tasks,
-            "release_scheduled_jobs": [],
-            "storage_summary": {
-                "db_type": "SQLite 存储引擎",
-                "db_file_path": os.path.abspath("data/release-center.db"),
-                "db_size": "未知/已限制",
-                "server_count": 0,
-                "backup_count": 0,
-                "backup_total_size": "0 B",
-                "latest_backup_at": "暂无备份点"
-            }
+    possible_db_paths = [
+        os.getenv("SQLITE_PATH", ""),
+        "data/release-center.db",
+        "data/release_center.db",
+        "release-center.db",
+        "release_center.db",
+        "/app/data/release-center.db",
+        "/app/data/release_center.db"
+    ]
+    
+    actual_db_path = "data/release-center.db"
+    db_size_bytes = 0
+    for p in possible_db_paths:
+        if p and os.path.exists(p):
+            try:
+                size = os.path.getsize(p)
+                actual_db_path = os.path.abspath(p)
+                if size > 0:
+                    db_size_bytes = size
+                    break
+            except Exception:
+                pass
+    
+    server_count = 0
+    backup_records = []
+    try:
+        server_count = db.query(JenkinsServer).count()
+        backup_records = db.query(JenkinsBackup).all()
+    except Exception as query_err:
+        from loguru import logger
+        logger.warning(f"Could not query DB stats: {query_err}")
+        
+    backup_count = len(backup_records)
+    backup_bytes_total = 0
+    latest_backup_time = None
+    
+    for b in backup_records:
+        path = getattr(b, "zip_path", None)
+        possible_b_paths = []
+        if path:
+            possible_b_paths.extend([
+                path,
+                os.path.abspath(path),
+                os.path.join(os.getcwd(), path)
+            ])
+        
+        b_id = getattr(b, "id", None)
+        s_id = getattr(b, "server_id", None)
+        if b_id and s_id:
+            rel_std = os.path.join("data", "backups", f"server_{s_id}", f"backup_{b_id}.zip.enc")
+            possible_b_paths.extend([
+                rel_std,
+                os.path.abspath(rel_std),
+                os.path.join(os.getcwd(), rel_std),
+                f"/app/data/backups/server_{s_id}/backup_{b_id}.zip.enc"
+            ])
+
+        for bp in possible_b_paths:
+            if bp and os.path.exists(bp):
+                try:
+                    f_sz = os.path.getsize(bp)
+                    if f_sz > 0:
+                        backup_bytes_total += f_sz
+                        break
+                except Exception:
+                    pass
+
+        if getattr(b, "backup_time", None):
+            if latest_backup_time is None or b.backup_time > latest_backup_time:
+                latest_backup_time = b.backup_time
+
+    latest_str = "暂无备份点"
+    if latest_backup_time:
+        try:
+            latest_str = latest_backup_time.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            latest_str = str(latest_backup_time)
+
+    res_data = {
+        "scheduler_summary": {
+            "status": "RUNNING",
+            "engine": "自动调度引擎",
+            "jobstore": "数据库持久化存储",
+            "total_jobs_count": len(all_jobs) or len(system_cron_tasks)
+        },
+        "system_cron_tasks": system_cron_tasks,
+        "release_scheduled_jobs": release_scheduled_jobs,
+        "storage_summary": {
+            "db_type": "SQLite 存储引擎",
+            "db_file_path": actual_db_path,
+            "db_size": format_file_size(db_size_bytes) if db_size_bytes > 0 else "已初始化 (低于 1KB)",
+            "server_count": server_count,
+            "backup_count": backup_count,
+            "backup_total_size": format_file_size(backup_bytes_total),
+            "latest_backup_at": latest_str
         }
+    }
+    _SCHEDULER_INFO_CACHE["timestamp"] = now_ts
+    _SCHEDULER_INFO_CACHE["data"] = res_data
+    return res_data
