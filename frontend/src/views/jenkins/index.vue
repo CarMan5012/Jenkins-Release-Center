@@ -363,7 +363,6 @@ async function loadJobs(trigger?: 'page' | 'refresh') {
   } else {
     jobsPageLoading.value = true;
   }
-  const startTime = Date.now();
   try {
     const res = await request.get(`/jenkins/servers/${selectedServerId.value}/views/${selectedViewId.value}/jobs`);
     jobs.value = res.data || [];
@@ -373,10 +372,6 @@ async function loadJobs(trigger?: 'page' | 'refresh') {
   } catch (err: any) {
     message.error(err.message || 'Job 加载失败');
   } finally {
-    const elapsed = Date.now() - startTime;
-    if (elapsed < 500) {
-      await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
-    }
     jobsPageLoading.value = false;
     btnJobsRefreshLoading.value = false;
   }

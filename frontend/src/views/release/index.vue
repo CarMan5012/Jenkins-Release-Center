@@ -371,7 +371,6 @@ async function loadPlans(trigger?: 'page' | 'refresh') {
   } else {
     pageLoading.value = true;
   }
-  const startTime = Date.now();
   error.value = '';
   try {
     const res = await request.get('/release/plans');
@@ -384,10 +383,6 @@ async function loadPlans(trigger?: 'page' | 'refresh') {
     error.value = err.message || '发布计划加载失败';
     message.error(err.message || '刷新失败');
   } finally {
-    const elapsed = Date.now() - startTime;
-    if (elapsed < 500) {
-      await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
-    }
     pageLoading.value = false;
     btnRefreshLoading.value = false;
   }

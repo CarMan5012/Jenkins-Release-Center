@@ -383,7 +383,6 @@ async function loadHistory(trigger?: 'page' | 'refresh') {
   if (isManual) {
     historyLoading.value = true;
   }
-  const startTime = Date.now();
   try {
     const res = await request.get('/history', { params: { page: 1, limit: 50 } });
     histories.value = res.data || [];
@@ -394,10 +393,6 @@ async function loadHistory(trigger?: 'page' | 'refresh') {
     message.error(err.message || '历史记录加载失败');
   } finally {
     if (isManual) {
-      const elapsed = Date.now() - startTime;
-      if (elapsed < 500) {
-        await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
-      }
       historyLoading.value = false;
     }
   }

@@ -345,7 +345,6 @@ async function loadDashboard(trigger?: 'page' | 'refresh' | 'list' | 'poll') {
     pageLoading.value = true;
   }
   
-  const startTime = Date.now();
   error.value = '';
   try {
     const [statsRes, plansRes] = await Promise.all([
@@ -364,10 +363,6 @@ async function loadDashboard(trigger?: 'page' | 'refresh' | 'list' | 'poll') {
     error.value = err.message || 'Dashboard 加载失败';
     message.error(err.message || '刷新失败');
   } finally {
-    const elapsed = Date.now() - startTime;
-    if (elapsed < 500) {
-      await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
-    }
     if (trigger === 'refresh') btnRefreshLoading.value = false;
     else if (trigger === 'list') btnListRefreshLoading.value = false;
     else if (trigger !== 'poll') pageLoading.value = false;

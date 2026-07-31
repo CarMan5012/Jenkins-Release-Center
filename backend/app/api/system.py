@@ -21,11 +21,18 @@ from app.services.jenkins_client import JenkinsClient
 
 router = APIRouter()
 
+_DASHBOARD_STATS_CACHE: Dict[str, Any] = {"timestamp": 0, "data": None}
+
 @router.get("/dashboard/stats")
 def get_dashboard_stats(
+    force_refresh: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    now_ts = datetime.now().timestamp()
+    if not force_refresh and _DASHBOARD_STATS_CACHE["data"] and (now_ts - _DASHBOARD_STATS_CACHE["timestamp"] < 5):
+        return _DASHBOARD_STATS_CACHE["data"]
+
     # Today's start and end times
     today_start = datetime.combine(datetime.now().date(), time.min)
     
@@ -69,12 +76,15 @@ def get_dashboard_stats(
     server_health = []
     
     def check_health(s):
-        client = JenkinsClient(s.url, s.username, s.api_token)
-        success, _ = client.test_connection()
-        return {"name": s.name, "status": "UP" if success else "DOWN"}
+        try:
+            client = JenkinsClient(s.url, s.username, s.api_token)
+            success, _ = client.test_connection()
+            return {"name": s.name, "status": "UP" if success else "DOWN"}
+        except Exception:
+            return {"name": s.name, "status": "DOWN"}
         
     if servers:
-        with ThreadPoolExecutor(max_workers=len(servers)) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(servers), 10)) as executor:
             health_results = list(executor.map(check_health, servers))
         server_health.extend(health_results)
         
@@ -92,7 +102,7 @@ def get_dashboard_stats(
             "created_at": h.created_at
         })
         
-    return {
+    res_data = {
         "stats": {
             "today_releases": today_count,
             "waiting_releases": waiting_count,
@@ -108,6 +118,9 @@ def get_dashboard_stats(
         "servers": server_health,
         "recent_history": recent_histories
     }
+    _DASHBOARD_STATS_CACHE["timestamp"] = now_ts
+    _DASHBOARD_STATS_CACHE["data"] = res_data
+    return res_data
 
 # Notification Config Routing
 @router.post("/notify-configs", response_model=NotifyConfigResponse)

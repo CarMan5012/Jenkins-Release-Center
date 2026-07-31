@@ -189,7 +189,6 @@ async function onTabChange() {
 
 async function syncExternalHistories() {
   syncing.value = true;
-  const startTime = Date.now();
   try {
     await request.post('/history/sync', null, {
       params: { job_name: queryJobName.value || undefined }
@@ -199,10 +198,6 @@ async function syncExternalHistories() {
   } catch (err: any) {
     message.error(err.message || '外部手动构建同步失败');
   } finally {
-    const elapsed = Date.now() - startTime;
-    if (elapsed < 500) {
-      await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
-    }
     syncing.value = false;
   }
 }
@@ -216,7 +211,6 @@ async function fetchHistories(resetPage = false, trigger?: 'page' | 'header' | '
       : null;
   if (buttonLoading) buttonLoading.value = true;
   else pageLoading.value = true;
-  const startTime = Date.now();
   error.value = '';
   try {
     const res = await request.get('/history', {
@@ -240,10 +234,6 @@ async function fetchHistories(resetPage = false, trigger?: 'page' | 'header' | '
     message.error(err.message || '刷新失败');
   } finally {
     if (buttonLoading) {
-      const elapsed = Date.now() - startTime;
-      if (elapsed < 500) {
-        await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
-      }
       buttonLoading.value = false;
     } else {
       pageLoading.value = false;
