@@ -1,6 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Form
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+import uuid
+import base64
+import random
+import string
+from io import BytesIO
+
 
 from app.core.database import get_db
 from app.core.security import verify_password, create_access_token, get_rsa_public_key_pem, rsa_decrypt
@@ -11,7 +17,9 @@ from collections import defaultdict
 import time
 
 login_attempts = defaultdict(lambda: {"count": 0, "lock_until": 0.0})
+captcha_store = {} # captcha_id -> {"code": code, "expires": float}
 from app.models.user import User, TokenBlacklist
+
 from app.schemas.user import Token, UserResponse
 
 router = APIRouter()
@@ -20,13 +28,61 @@ router = APIRouter()
 def get_public_key():
     return {"public_key": get_rsa_public_key_pem()}
 
+@router.get("/captcha")
+def get_captcha():
+    try:
+        from captcha.image import ImageCaptcha
+    except ImportError:
+        raise HTTPException(status_code=500, detail="CAPTCHA library not installed")
+        
+    image_captcha = ImageCaptcha(width=120, height=40)
+    now = time.time()
+    # Cleanup expired captchas
+    expired_keys = [k for k, v in captcha_store.items() if v["expires"] < now]
+    for k in expired_keys:
+        captcha_store.pop(k, None)
+        
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    image = image_captcha.generate_image(code)
+    
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    
+    captcha_id = str(uuid.uuid4())
+    captcha_store[captcha_id] = {"code": code.lower(), "expires": now + 300}
+    
+    return {"captcha_id": captcha_id, "image_base64": f"data:image/png;base64,{img_str}"}
+
 @router.post("/login", response_model=Token)
 def login(
     request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
+    captcha_id: str = Form(None),
+    captcha_code: str = Form(None),
     db: Session = Depends(get_db)
 ):
     is_prod = settings.APP_ENV != "development"
+
+    # CAPTCHA Validation (Only required if provided or in production)
+    if is_prod or captcha_id:
+        if not captcha_id or not captcha_code:
+            raise HTTPException(status_code=400, detail="请输入验证码")
+        
+        stored = captcha_store.get(captcha_id)
+        if not stored:
+            raise HTTPException(status_code=400, detail="验证码已过期，请点击图片刷新")
+            
+        if stored["expires"] < time.time():
+            captcha_store.pop(captcha_id, None)
+            raise HTTPException(status_code=400, detail="验证码已过期，请点击图片刷新")
+            
+        if stored["code"] != captcha_code.lower():
+            raise HTTPException(status_code=400, detail="验证码不正确")
+            
+        # One-time use
+        captcha_store.pop(captcha_id, None)
+
     
     try:
         username = rsa_decrypt(form_data.username)

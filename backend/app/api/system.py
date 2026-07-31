@@ -97,7 +97,7 @@ def get_dashboard_stats(
             "today_releases": today_count,
             "waiting_releases": waiting_count,
             "running_releases": running_count,
-            "success_rate": round(success_count / (success_count + failed_count) * 100, 2) if (success_count + failed_count) > 0 else 100.0,
+            "success_rate": round(success_count / (success_count + failed_count) * 100, 2) if (success_count + failed_count) > 0 else 0.0,
             "failed_releases": failed_count
         },
         "trend": {

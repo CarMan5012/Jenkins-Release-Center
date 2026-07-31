@@ -19,6 +19,11 @@
 </template>
 
 <script setup lang="ts">
+import { onMounted, onUnmounted } from 'vue';
+import { useRouter } from 'vue-router';
+import { useAuthStore } from './store/auth';
+import request from './utils/request';
+
 import {
   dateZhCN,
   NConfigProvider,
@@ -31,7 +36,53 @@ import {
 } from 'naive-ui';
 import type { GlobalThemeOverrides } from 'naive-ui';
 
+const router = useRouter();
+const authStore = useAuthStore();
+
+let idleTimer: number | null = null;
+const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+
+function resetIdleTimer() {
+  if (idleTimer) {
+    window.clearTimeout(idleTimer);
+  }
+  if (authStore.token) {
+    idleTimer = window.setTimeout(handleIdleTimeout, IDLE_TIMEOUT);
+  }
+}
+
+async function handleIdleTimeout() {
+  if (authStore.token) {
+    try {
+      await request.post('/auth/logout');
+    } catch (e) {
+      console.error('Auto logout error:', e);
+    } finally {
+      authStore.logout();
+      router.push('/login');
+    }
+  }
+}
+
+const activityEvents = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart'];
+
+onMounted(() => {
+  activityEvents.forEach(event => {
+    window.addEventListener(event, resetIdleTimer, { passive: true });
+  });
+  resetIdleTimer();
+});
+
+onUnmounted(() => {
+  activityEvents.forEach(event => {
+    window.removeEventListener(event, resetIdleTimer);
+  });
+  if (idleTimer) window.clearTimeout(idleTimer);
+});
+
+
 const themeOverrides: GlobalThemeOverrides = {
+
   common: {
     primaryColor: '#0071e3',
     primaryColorHover: '#147ce5',

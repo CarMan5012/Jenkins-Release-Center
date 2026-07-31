@@ -19,14 +19,21 @@
         <n-form-item label="密码" path="password">
           <n-input v-model:value="model.password" type="password" show-password-on="click" autocomplete="current-password" placeholder="password" />
         </n-form-item>
+        <n-form-item label="验证码" path="captcha_code">
+          <div style="display: flex; gap: 12px; width: 100%;">
+            <n-input v-model:value="model.captcha_code" placeholder="请输入验证码" @keydown.enter.prevent="handleLogin" />
+            <img v-if="captchaUrl" :src="captchaUrl" @click="fetchCaptcha" style="height: 40px; cursor: pointer; border-radius: 4px; border: 1px solid var(--line-soft);" alt="captcha" title="点击刷新" />
+          </div>
+        </n-form-item>
         <n-button type="primary" attr-type="submit" block :loading="loading">登录</n-button>
+
       </n-form>
     </section>
   </main>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { NAlert, NButton, NForm, NFormItem, NInput, useMessage } from 'naive-ui';
 import type { FormInst, FormRules } from 'naive-ui';
@@ -41,12 +48,30 @@ const formRef = ref<FormInst | null>(null);
 const loading = ref(false);
 const error = ref('');
 
-const model = ref({ username: '', password: '' });
+const model = ref({ username: '', password: '', captcha_id: '', captcha_code: '' });
+const captchaUrl = ref('');
 
 const rules: FormRules = {
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
+  captcha_code: [{ required: true, message: '请输入验证码', trigger: 'blur' }],
 };
+
+async function fetchCaptcha() {
+  try {
+    const res = await request.get('/auth/captcha');
+    model.value.captcha_id = res.data.captcha_id;
+    captchaUrl.value = res.data.image_base64;
+    model.value.captcha_code = ''; // reset on fetch
+  } catch (e) {
+    console.error('Failed to fetch captcha', e);
+  }
+}
+
+onMounted(() => {
+  fetchCaptcha();
+});
+
 
 function handleLogin() {
   formRef.value?.validate(async (errors) => {
@@ -59,6 +84,8 @@ function handleLogin() {
       const formData = new URLSearchParams();
       formData.append('username', encryptedUsername);
       formData.append('password', encryptedPassword);
+      formData.append('captcha_id', model.value.captcha_id);
+      formData.append('captcha_code', model.value.captcha_code);
       const response = await request.post('/auth/login', formData, {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       });
@@ -68,6 +95,7 @@ function handleLogin() {
       router.push('/dashboard');
     } catch (err: any) {
       error.value = err.message || '登录失败，请检查账号和密码';
+      fetchCaptcha(); // 登录失败时刷新验证码
     } finally {
       loading.value = false;
     }

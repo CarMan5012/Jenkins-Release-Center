@@ -19,3 +19,4 @@ docs/
 skills-lock.json
 .worktrees/
 backend/data/backups/ 
+docker.start.sh
