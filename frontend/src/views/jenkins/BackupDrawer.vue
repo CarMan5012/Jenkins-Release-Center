@@ -395,9 +395,41 @@ const visibleJobs = computed(() => {
   return details.value.jobs.filter((job) => jobNames.has(job.name));
 });
 
+let pollTimer: any = null;
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function startPollingIfNeeded() {
+  const hasBackuping = backups.value.some((b) => b.status === 'BACKUPING');
+  if (hasBackuping) {
+    if (!pollTimer) {
+      pollTimer = setInterval(() => {
+        fetchBackups(true);
+      }, 2000);
+    }
+  } else {
+    stopPolling();
+  }
+}
+
+const handleWsUpdate = () => fetchBackups(true);
+
 watch(() => props.show, (newValue) => {
   visible.value = newValue;
-  if (newValue && props.server) fetchBackups();
+  if (newValue && props.server) {
+    fetchBackups();
+    wsService.on('JENKINS_UPDATE', handleWsUpdate);
+    wsService.on('BACKUP_UPDATE', handleWsUpdate);
+  } else {
+    stopPolling();
+    wsService.off('JENKINS_UPDATE', handleWsUpdate);
+    wsService.off('BACKUP_UPDATE', handleWsUpdate);
+  }
 });
 
 watch(visible, (newValue) => emit('update:show', newValue));
@@ -406,6 +438,9 @@ watch(summaryVisible, (newValue) => {
 }, { flush: 'sync' });
 
 function onClosed() {
+  stopPolling();
+  wsService.off('JENKINS_UPDATE', handleWsUpdate);
+  wsService.off('BACKUP_UPDATE', handleWsUpdate);
   backups.value = [];
   error.value = '';
 }
@@ -426,6 +461,7 @@ async function fetchBackups(silent = false) {
   try {
     const response = await request.get(`/jenkins/servers/${props.server.id}/backups`);
     backups.value = response.data || [];
+    startPollingIfNeeded();
   } catch (err: any) {
     if (!silent) {
       error.value = err.message || '获取备份历史失败';
@@ -442,9 +478,8 @@ async function triggerNewBackup() {
   backingUp.value = true;
   try {
     await request.post(`/jenkins/servers/${props.server.id}/backups`);
-    message.success('备份任务已提交后台执行，请稍后刷新列表');
-    await fetchBackups();
-    wsService.on('BACKUP_UPDATE', () => fetchBackups(true));
+    message.success('备份任务已提交后台执行');
+    await fetchBackups(true);
   } catch (err: any) {
     message.error(err.message || '触发备份失败');
   } finally {

@@ -1107,6 +1107,17 @@ def execute_jenkins_backup(server_id: int, backup_id: int):
             backup_record.zip_path = enc_filepath
             db.commit()
 
+            try:
+                from app.core.ws_manager import manager
+                manager.broadcast_event("JENKINS_UPDATE", {
+                    "action": "BACKUP_UPDATE",
+                    "server_id": server_id,
+                    "backup_id": backup_id,
+                    "status": "SUCCESS"
+                })
+            except Exception as ws_err:
+                logging.warning(f"Could not broadcast backup success event: {ws_err}")
+
         finally:
             # Always delete the plain zip file
             if os.path.exists(zip_filepath):
@@ -1120,6 +1131,18 @@ def execute_jenkins_backup(server_id: int, backup_id: int):
         backup_record.status = "FAILED"
         backup_record.zip_path = None
         db.commit()
+
+        try:
+            from app.core.ws_manager import manager
+            manager.broadcast_event("JENKINS_UPDATE", {
+                "action": "BACKUP_UPDATE",
+                "server_id": server_id,
+                "backup_id": backup_id,
+                "status": "FAILED"
+            })
+        except Exception as ws_err:
+            logging.warning(f"Could not broadcast backup fail event: {ws_err}")
+
         if enc_filepath and os.path.exists(enc_filepath):
             try:
                 os.remove(enc_filepath)
