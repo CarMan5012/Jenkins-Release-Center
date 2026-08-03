@@ -32,22 +32,22 @@ def decrypt_backup_to_memory(enc_filepath: str) -> bytes:
 
     if not os.path.exists(enc_filepath):
         raise HTTPException(status_code=404, detail="备份文件不存在")
-        
+
     key_material = settings.BACKUP_ENCRYPTION_KEY
     if not key_material:
         raise HTTPException(status_code=500, detail="备份密钥未配置")
-        
+
     aes_key = hashlib.sha256(key_material.strip().encode()).digest()
-    
+
     with open(enc_filepath, "rb") as f:
         file_content = f.read()
-        
+
     if len(file_content) < 5 + 12 + 16 or file_content[:5] != b"JRCB1":
         raise HTTPException(status_code=400, detail="备份密钥错误或文件已损坏")
-        
+
     nonce = file_content[5:17]
     ciphertext = file_content[17:]
-    
+
     try:
         aesgcm = AESGCM(aes_key)
         decrypted_data = aesgcm.decrypt(nonce, ciphertext, None)
@@ -106,7 +106,7 @@ def create_server(
     db.commit()
     db.refresh(db_server)
     log_action(db, current_user, "CREATE_JENKINS_SERVER", get_client_ip(request), f"添加 Jenkins 实例: {server.name}")
-    
+
     # 自动触发后台同步任务（仅在启用状态下）
     if db_server.is_active:
         syncing_servers.add(db_server.id)
@@ -118,9 +118,9 @@ def create_server(
                 loguru.logger.error(f"Background sync failed for newly created server {sid}: {str(e)}")
             finally:
                 syncing_servers.discard(sid)
-                
+
         background_tasks.add_task(run_sync_and_cleanup, db_server.id)
-    
+
     return db_server
 
 @router.get("/servers", response_model=List[JenkinsServerResponse])
@@ -152,19 +152,19 @@ def update_server(
     server = db.get(JenkinsServer, server_id)
     if not server:
         raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例")
-        
+
     update_data = server_in.model_dump(exclude_unset=True)
-    
+
     # Validate URL and Token re-submission if Origin changes
     from app.core.config import settings
     from urllib.parse import urlparse
-    
+
     if "url" in update_data:
         try:
             validate_jenkins_url(update_data["url"], settings.APP_ENV != "development", settings.JENKINS_ALLOWED_ORIGINS)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-            
+
         old_parsed = urlparse(server.url)
         new_parsed = urlparse(update_data["url"])
         old_origin = f"{old_parsed.scheme}://{old_parsed.netloc}"
@@ -172,22 +172,22 @@ def update_server(
         if new_origin != old_origin:
             if "api_token" not in update_data or not update_data["api_token"] or update_data["api_token"] in ["********", "••••••••"]:
                 raise HTTPException(status_code=400, detail="修改 Jenkins origin 时必须重新提交 Token")
-                
+
     if "username" in update_data:
         if update_data["username"] and not update_data["username"].startswith("enc:"):
             update_data["username"] = encrypt_secret(update_data["username"])
         elif update_data["username"] and update_data["username"].startswith("enc:"):
             del update_data["username"]
-            
+
     if "api_token" in update_data:
         if not update_data["api_token"] or update_data["api_token"] in ["********", "••••••••"]:
             del update_data["api_token"]
         else:
             update_data["api_token"] = encrypt_secret(update_data["api_token"])
-        
+
     for field, value in update_data.items():
         setattr(server, field, value)
-        
+
     db.commit()
     db.refresh(server)
     log_action(db, current_user, "UPDATE_JENKINS_SERVER", get_client_ip(request), f"更新 Jenkins 实例: {server.name}")
@@ -203,14 +203,14 @@ def delete_server(
     server = db.get(JenkinsServer, server_id)
     if not server:
         raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例")
-    
+
     # 强制级联删除所有关联的发布计划、任务和历史记录
     from app.models.release import ReleasePlan, ReleaseTask, ReleaseHistory
-    
+
     # 查找所有与该实例相关的发布计划 ID
     tasks = db.query(ReleaseTask.plan_id).filter(ReleaseTask.server_id == server_id).distinct().all()
     plan_ids = [t[0] for t in tasks]
-    
+
     try:
         if plan_ids:
             # 删除相关的历史记录
@@ -219,16 +219,16 @@ def delete_server(
             db.query(ReleaseTask).filter(ReleaseTask.plan_id.in_(plan_ids)).delete(synchronize_session=False)
             # 删除相关的计划本身
             db.query(ReleasePlan).filter(ReleasePlan.id.in_(plan_ids)).delete(synchronize_session=False)
-            
+
         # 删除任何其他仅仅关联该 server_id 的孤立历史记录（虽然通常有 plan_id）
         db.query(ReleaseHistory).filter(ReleaseHistory.server_id == server_id).delete(synchronize_session=False)
-        
+
         db.delete(server)
         db.commit()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"强制删除失败：{str(e)}")
-        
+
     log_action(db, current_user, "DELETE_JENKINS_SERVER", get_client_ip(request), f"删除 Jenkins 实例: {server.name} 及其关联依赖数据")
     return {"success": True, "message": "Jenkins 实例及相关的所有发布数据已强制删除"}
 
@@ -243,7 +243,7 @@ def test_server_connection(
         raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例")
     if not server.is_active:
         raise HTTPException(status_code=400, detail="该 Jenkins 实例已被禁用，无法测试连接")
-        
+
     client = JenkinsClient(server.url, server.username, server.api_token)
     success, message = client.test_connection()
     return {"success": success, "message": message}
@@ -259,22 +259,22 @@ def sync_jenkins_data(server_id: int):
         server = db.query(JenkinsServer).filter(JenkinsServer.id == server_id).first()
         if not server:
             return
-            
+
         client = JenkinsClient(server.url, server.username, server.api_token)
-        
+
         # 1. Fetch Views
         views = client.get_views()
         view_names = []
         for view_data in views:
             view_name = view_data["name"]
             view_names.append(view_name)
-            
+
             # Upsert View
             db_view = db.query(JenkinsView).filter(
                 JenkinsView.server_id == server_id,
                 JenkinsView.name == view_name
             ).first()
-            
+
             if not db_view:
                 db_view = JenkinsView(
                     server_id=server_id,
@@ -285,24 +285,24 @@ def sync_jenkins_data(server_id: int):
             else:
                 db_view.url = view_data["url"]
             db.commit()
-            
+
         # Optional: Remove Views in DB that no longer exist in Jenkins
         db.query(JenkinsView).filter(
             JenkinsView.server_id == server_id,
             ~JenkinsView.name.in_(view_names)
         ).delete(synchronize_session=False)
         db.commit()
-        
+
         # 2. Fetch and Sync Jobs under each View
         db_views = db.query(JenkinsView).filter(JenkinsView.server_id == server_id).all()
         synced_job_names = []
-        
+
         for view in db_views:
             jobs = client.get_jobs_in_view(view.name)
             for job_data in jobs:
                 job_name = job_data["name"]
                 synced_job_names.append(job_name)
-                
+
                 # Retrieve last build metadata if present
                 last_build = job_data.get("lastBuild")
                 last_num = last_build.get("number") if last_build else None
@@ -310,13 +310,13 @@ def sync_jenkins_data(server_id: int):
                 last_time = None
                 if last_build and last_build.get("timestamp"):
                     last_time = datetime.fromtimestamp(last_build.get("timestamp") / 1000.0)
-                
+
                 # Upsert Job
                 db_job = db.query(JenkinsJob).filter(
                     JenkinsJob.server_id == server_id,
                     JenkinsJob.name == job_name
                 ).first()
-                
+
                 if not db_job:
                     db_job = JenkinsJob(
                         server_id=server_id,
@@ -329,20 +329,25 @@ def sync_jenkins_data(server_id: int):
                     )
                     db.add(db_job)
                 else:
-                    db_job.view_id = view.id
+                    if view.name.lower() != "all" or not db_job.view_id:
+                        db_job.view_id = view.id
                     db_job.description = job_data.get("description")
                     db_job.last_build_number = last_num
                     db_job.last_build_result = last_result
                     db_job.last_build_time = last_time
                 db.commit()
-                
+
         # Remove deleted jobs
         db.query(JenkinsJob).filter(
             JenkinsJob.server_id == server_id,
             ~JenkinsJob.name.in_(synced_job_names)
         ).delete(synchronize_session=False)
         db.commit()
-        
+
+        # Update server last_synced_at upon complete success
+        server.last_synced_at = datetime.now()
+        db.commit()
+
     except Exception as e:
         import loguru
         loguru.logger.error(f"Sync error for server {server_id}: {str(e)}")
@@ -366,12 +371,12 @@ def trigger_sync(
         raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例")
     if not server.is_active:
         raise HTTPException(status_code=400, detail="该 Jenkins 实例已被禁用，无法执行数据同步")
-        
+
     if server_id in syncing_servers:
         raise HTTPException(status_code=409, detail="该 Jenkins 实例已在数据同步中，请勿重复提交")
-        
+
     syncing_servers.add(server_id)
-    
+
     def run_sync_and_cleanup(sid: int):
         try:
             sync_jenkins_data(sid)
@@ -381,7 +386,7 @@ def trigger_sync(
         finally:
             syncing_servers.discard(sid)
             manager.broadcast_event("SYNC_UPDATE", {"server_id": sid, "syncing": False})
-            
+
     background_tasks.add_task(run_sync_and_cleanup, server_id)
     log_action(db, current_user, "SYNC_JENKINS", get_client_ip(request), f"Triggered background Views/Jobs sync for server {server.name}")
     return {"success": True, "message": "Jenkins 数据同步任务已在后台启动"}
@@ -415,7 +420,7 @@ def get_view_jobs(
     view = db.get(JenkinsView, view_id)
     if view and view.name.lower() == "all":
         return db.query(JenkinsJob).filter(JenkinsJob.server_id == server_id).all()
-        
+
     return db.query(JenkinsJob).filter(
         JenkinsJob.server_id == server_id,
         JenkinsJob.view_id == view_id
@@ -445,7 +450,7 @@ def get_git_branches(
         raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例或对应的 Job")
     if not server.is_active:
         raise HTTPException(status_code=400, detail="该 Jenkins 实例已被禁用，无法获取分支信息")
-        
+
     branches: List[str] = []
     job = (
         db.query(JenkinsJob)
@@ -513,7 +518,7 @@ def run_job_directly(
     try:
         queue_url = client.trigger_build(job.name, parameters, branch=branch)
         log_action(db, current_user, "RUN_JENKINS_JOB_DIRECTLY", get_client_ip(request), f"直接触发任务 '{job.name}' 构建 (分支: {branch})，实例: '{server.name}'")
-        
+
         def delayed_sync():
             import time
             time.sleep(1.2)
@@ -523,9 +528,9 @@ def run_job_directly(
                 manager.broadcast_event("HISTORY_UPDATE")
             except Exception:
                 pass
-            
+
         background_tasks.add_task(delayed_sync)
-        
+
         return {
             "success": True,
             "message": f"成功向 Jenkins 触发任务 [{job.name}] 构建",
@@ -551,7 +556,7 @@ def create_backup(
         raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例")
     if not server.is_active:
         raise HTTPException(status_code=400, detail="该 Jenkins 实例已被禁用，无法创建备份")
-        
+
     try:
         idem_key = normalize_idempotency_key(request.headers.get("Idempotency-Key"), current_user.id)
     except ValueError as error:
@@ -569,7 +574,7 @@ def create_backup(
         idempotency_key=idem_key
     )
     db.add(db_backup)
-    
+
     from sqlalchemy.exc import IntegrityError
     try:
         db.commit()
@@ -581,12 +586,12 @@ def create_backup(
                 log_action(db, current_user, "IDEMPOTENCY_CONFLICT", get_client_ip(request), f"重复触发备份拦截，Key: {idem_key}")
                 return existing
         raise HTTPException(status_code=409, detail="并发请求冲突")
-        
+
     db.refresh(db_backup)
-    
+
     from app.services.jenkins_backup_service import execute_jenkins_backup
     background_tasks.add_task(execute_jenkins_backup, server_id, db_backup.id)
-    
+
     log_action(db, current_user, "CREATE_BACKUP", get_client_ip(request), f"创建配置备份任务 #{db_backup.id}（实例: {server_id}）")
     return db_backup
 
@@ -622,7 +627,7 @@ def get_backup_details(
 ):
     if not is_request_trusted_https(request):
         raise HTTPException(status_code=400, detail="直接 HTTP 访问或非安全连接下禁止在线查看明文凭据")
-        
+
     backup = db.get(JenkinsBackup, backup_id)
     if not backup or backup.server_id != server_id:
         raise HTTPException(status_code=404, detail="未找到对应的备份记录。")
@@ -634,7 +639,7 @@ def get_backup_details(
         import io
         with zipfile.ZipFile(io.BytesIO(decrypted_data)) as archive:
             details = json.loads(archive.read("details.json"))
-            
+
         log_action(db, current_user, "VIEW_BACKUP_DETAILS", get_client_ip(request), f"查看备份记录详情 #{backup_id}（实例: {server_id}）")
         return details
     except Exception:
@@ -653,10 +658,10 @@ def download_backup_zip(
         raise HTTPException(status_code=404, detail="未找到对应的备份记录。")
     if backup.status != "SUCCESS" or not backup.zip_path or not os.path.exists(backup.zip_path):
         raise HTTPException(status_code=400, detail="备份文件缺失或尚未就绪。")
-    
+
     # Audit log
     log_action(db, current_user, "DOWNLOAD_BACKUP", get_client_ip(request), f"下载加密备份包 #{backup_id}（实例: {server_id}）")
-    
+
     filename = f"jenkins_backup_server_{server_id}_{backup.backup_time.strftime('%Y%m%d%H%M%S')}.zip.enc"
     return FileResponse(
         path=backup.zip_path,
@@ -675,13 +680,13 @@ def delete_backup(
     backup = db.get(JenkinsBackup, backup_id)
     if not backup or backup.server_id != server_id:
         raise HTTPException(status_code=404, detail="未找到对应的备份记录")
-        
+
     if backup.zip_path and os.path.exists(backup.zip_path):
         try:
             os.remove(backup.zip_path)
         except OSError:
             pass
-            
+
     db.delete(backup)
     db.commit()
     log_action(db, current_user, "DELETE_BACKUP", get_client_ip(request), f"删除配置备份记录 #{backup_id}（实例: {server_id}）")

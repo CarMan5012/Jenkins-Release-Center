@@ -15,7 +15,7 @@
     <div class="metrics-grid">
       <div v-for="metric in metrics" :key="metric.label" class="metric-tile panel">
         <span>{{ metric.label }}</span>
-        <strong>{{ metric.value }}</strong>
+        <strong :style="metric.style">{{ metric.value }}</strong>
         <small>{{ metric.note }}</small>
       </div>
     </div>
@@ -277,9 +277,17 @@ const btnListRefreshLoading = ref(false);
 const error = ref('');
 const busyKey = ref('');
 const plans = ref<ReleasePlan[]>([]);
+interface JenkinsApiStats {
+  today_count: number;
+  total_count: number;
+  last_request_at?: string | null;
+  by_category?: Record<string, number>;
+}
+
 const servers = ref<Array<{ name: string; status: string }>>([]);
 const recentHistory = ref<RecentHistory[]>([]);
 const dashboardStats = ref({ success_rate: 100, failed_releases: 0, running_releases: 0 });
+const jenkinsApiStats = ref<JenkinsApiStats>({ today_count: 0, total_count: 0 });
 
 const keyword = ref('');
 const statusFilter = ref('ALL');
@@ -326,6 +334,14 @@ const metrics = computed(() => [
   { label: '成功率', value: `${dashboardStats.value.success_rate}%`, note: '历史执行统计' },
   { label: '失败数', value: dashboardStats.value.failed_releases, note: '历史失败记录' },
   { label: '最近执行', value: latestRun.value, note: '按历史记录排序' },
+  {
+    label: 'Jenkins API 请求',
+    value: `${jenkinsApiStats.value.today_count || 0} 次`,
+    note: jenkinsApiStats.value.last_request_at
+      ? `最近请求: ${jenkinsApiStats.value.last_request_at}`
+      : `累计调用 ${jenkinsApiStats.value.total_count || 0} 次`,
+    style: 'background: linear-gradient(135deg, #059669 0%, #10b981 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent;',
+  },
 ]);
 
 function preflightTagType(status: PreflightStatus): 'default' | 'success' | 'warning' | 'error' {
@@ -347,13 +363,15 @@ async function loadDashboard(trigger?: 'page' | 'refresh' | 'list' | 'poll') {
   
   error.value = '';
   try {
+    const forceParam = (trigger === 'page' || trigger === 'refresh') ? '?force_refresh=true' : '';
     const [statsRes, plansRes] = await Promise.all([
-      request.get('/system/dashboard/stats'),
+      request.get(`/system/dashboard/stats${forceParam}`),
       request.get('/release/plans'),
     ]);
     dashboardStats.value = statsRes.data.stats || dashboardStats.value;
     servers.value = statsRes.data.servers || [];
     recentHistory.value = statsRes.data.recent_history || [];
+    jenkinsApiStats.value = statsRes.data.jenkins_api_stats || jenkinsApiStats.value;
     plans.value = plansRes.data || [];
     checkAndTogglePolling();
     if (trigger === 'refresh' || trigger === 'list') {

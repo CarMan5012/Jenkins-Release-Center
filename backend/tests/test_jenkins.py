@@ -22,7 +22,7 @@ def test_jenkins_connection_success(mock_get):
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_get.return_value = mock_response
-    
+
     client = JenkinsClient("http://localhost:8080", "admin", "token123")
     success, message = client.test_connection()
     assert success is True
@@ -37,10 +37,10 @@ def test_jenkins_trigger_build_with_parameters(mock_post):
     mock_response.status_code = 201
     mock_response.headers = {"Location": "http://localhost:8080/queue/item/42/"}
     mock_post.return_value = mock_response
-    
+
     client = JenkinsClient("http://localhost:8080", "admin", "token123")
     queue_url = client.trigger_build("frontend-deploy", {"ENV": "production", "DEBUG": "false"})
-    
+
     assert queue_url == "http://localhost:8080/queue/item/42/"
     mock_post.assert_called_once_with(
         "http://localhost:8080/job/frontend-deploy/buildWithParameters",
@@ -334,4 +334,162 @@ def test_run_job_directly_rejects_cross_server_job():
 
     assert error.value.status_code == 404
     trigger.assert_not_called()
-    db.close()
+    db.close()
+
+
+def test_ensure_jenkins_last_synced_at_column_idempotent():
+    from sqlalchemy import text, inspect
+    from app.services.init_db import ensure_jenkins_last_synced_at_column
+
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE jenkins_server (id INTEGER PRIMARY KEY, name VARCHAR(100))"))
+
+    ensure_jenkins_last_synced_at_column(engine)
+    ensure_jenkins_last_synced_at_column(engine)
+
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("jenkins_server")}
+    assert "last_synced_at" in columns
+
+
+def test_sync_jenkins_data_updates_last_synced_at_on_success():
+    from datetime import datetime
+    from app.api.jenkins import sync_jenkins_data
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    db = session_factory()
+
+    server = JenkinsServer(id=1, name="jenkins-test", url="http://jenkins.test", username="admin", api_token="tok", last_synced_at=None)
+    db.add(server)
+    db.commit()
+    db.close()
+
+    mock_client = MagicMock()
+    mock_client.get_views.return_value = [{"name": "All", "url": "http://jenkins.test/view/All/"}]
+    mock_client.get_jobs_in_view.return_value = [{"name": "test-job", "description": "desc", "lastBuild": None}]
+
+    with patch("app.api.jenkins.SyncSessionLocal", side_effect=session_factory), \
+         patch("app.api.jenkins.JenkinsClient", return_value=mock_client):
+        sync_jenkins_data(1)
+
+    db = session_factory()
+    updated_server = db.get(JenkinsServer, 1)
+    assert updated_server.last_synced_at is not None
+    assert isinstance(updated_server.last_synced_at, datetime)
+    db.close()
+
+
+def test_sync_jenkins_data_preserves_last_synced_at_on_failure():
+    from datetime import datetime
+    from app.api.jenkins import sync_jenkins_data
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    db = session_factory()
+
+    previous_sync_time = datetime(2026, 1, 1, 12, 0, 0)
+    server = JenkinsServer(id=1, name="jenkins-test", url="http://jenkins.test", username="admin", api_token="tok", last_synced_at=previous_sync_time)
+    db.add(server)
+    db.commit()
+    db.close()
+
+    mock_client = MagicMock()
+    mock_client.get_views.side_effect = RuntimeError("Network error during sync")
+
+    with patch("app.api.jenkins.SyncSessionLocal", side_effect=session_factory), \
+         patch("app.api.jenkins.JenkinsClient", return_value=mock_client):
+        with pytest.raises(RuntimeError, match="Network error during sync"):
+            sync_jenkins_data(1)
+
+    db = session_factory()
+    failed_server = db.get(JenkinsServer, 1)
+    assert failed_server.last_synced_at == previous_sync_time
+    db.close()
+
+
+def test_jenkins_server_schema_includes_last_synced_at():
+    from datetime import datetime
+    from app.schemas.jenkins import JenkinsServerResponse
+
+    now = datetime.now()
+    server = JenkinsServer(
+        id=1,
+        name="test",
+        url="http://test",
+        username="admin",
+        api_token="tok",
+        is_active=1,
+        created_at=now,
+        updated_at=now,
+        last_synced_at=now,
+    )
+    schema = JenkinsServerResponse.model_validate(server)
+    assert schema.last_synced_at == now
+
+
+def test_sync_all_active_jenkins_servers():
+    from app.services.jenkins_sync_task import sync_all_active_jenkins_servers
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    db = session_factory()
+
+    active_server = JenkinsServer(id=1, name="active", url="http://a.test", username="u", api_token="t", is_active=1)
+    inactive_server = JenkinsServer(id=2, name="inactive", url="http://i.test", username="u", api_token="t", is_active=0)
+    db.add_all([active_server, inactive_server])
+    db.commit()
+    db.close()
+
+    with patch("app.services.jenkins_sync_task.SyncSessionLocal", side_effect=session_factory), \
+         patch("app.api.jenkins.sync_jenkins_data") as mock_sync:
+        sync_all_active_jenkins_servers()
+
+    mock_sync.assert_called_once_with(1)
+
+
+def test_reload_jenkins_auto_sync_job():
+    from app.services.scheduler import SchedulerManager
+    from app.models.system import SystemConfig
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    db = session_factory()
+
+    db.add_all([
+        SystemConfig(config_key="jenkins_auto_sync_enabled", config_value="1", description="desc"),
+        SystemConfig(config_key="jenkins_auto_sync_time", config_value="08:00", description="desc")
+    ])
+    db.commit()
+    db.close()
+
+    manager = SchedulerManager()
+    with patch("app.services.scheduler.SyncSessionLocal", side_effect=session_factory), \
+         patch.object(manager.scheduler, "add_job") as mock_add_job:
+        manager.reload_jenkins_auto_sync_job()
+
+    mock_add_job.assert_called_once()
+    assert mock_add_job.call_args[1]["id"] == "auto_sync_jenkins_data"
+    assert mock_add_job.call_args[1]["hour"] == 8
+    assert mock_add_job.call_args[1]["minute"] == 0
+
+
+def test_jenkins_api_tracker():
+    from app.services.jenkins_client import JenkinsApiTracker
+
+    stats_before = JenkinsApiTracker.get_stats()
+    initial_today = stats_before["today_count"]
+    initial_total = stats_before["total_count"]
+
+    JenkinsApiTracker.record_request("test_cat")
+    stats_after = JenkinsApiTracker.get_stats()
+
+    assert stats_after["today_count"] == initial_today + 1
+    assert stats_after["total_count"] == initial_total + 1
+    assert stats_after["by_category"].get("test_cat", 0) >= 1
+    assert stats_after["last_request_at"] is not None

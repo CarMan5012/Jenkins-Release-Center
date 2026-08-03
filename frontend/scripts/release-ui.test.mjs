@@ -45,13 +45,29 @@ for (const viewSource of [releaseViewSource, detailSource, dashboardSource]) {
 assert.match(releaseViewSource, /<PreflightResult/);
 assert.match(detailSource, /<PreflightResult/);
 assert.match(jenkinsSource, /response\.data\.message/);
+assert.match(jenkinsSource, /\/jenkins\/servers\/\$\{serverId\}\/sync\/status/);
+assert.match(jenkinsSource, /if \(!res\.data \|\| !res\.data\.syncing\) \{\s*finishSync\(serverId\);/);
+assert.match(jenkinsSource, /function finishSync\(serverId: number/);
+assert.match(jenkinsSource, /onUnmounted\([\s\S]*?wsService\.off\('SYNC_UPDATE', handleSyncUpdate\)/);
 assert.match(releaseViewSource, /:disabled="[^"]*busyKey === `preflight-\$\{plan\.id\}`/);
 assert.match(releaseViewSource, /function triggerPlan\(plan: ReleasePlan\)[\s\S]*?busyKey\.value === `preflight-\$\{plan\.id\}`/);
 assert.match(detailSource, /const preflightLoading = ref\(false\)/);
 assert.match(detailSource, /:disabled="[^"]*preflightLoading/);
 assert.match(detailSource, /function triggerPlan\(\)[\s\S]*?preflightLoading\.value/);
+assert.match(jenkinsSource, /last_synced_at\?: string \| null/);
+assert.match(jenkinsSource, /上次成功同步：/);
+assert.match(jenkinsSource, /尚未同步/);
 assert.match(jenkinsSource, /runModalVisible\.value = false;[\s\S]*?router\.push\(\{[\s\S]*?path: '\/history'/);
 assert.match(jenkinsSource, /query: \{[\s\S]*?tab: 'external'/);
+
+// Regression assertions for sync loading state bug fix
+assert.match(jenkinsSource, /function finishSync\(serverId: number/);
+assert.match(jenkinsSource, /function clearSyncTimer\(serverId: number/);
+assert.match(jenkinsSource, /onMounted\([\s\S]*?wsService\.on\('SYNC_UPDATE', handleSyncUpdate\)/);
+assert.match(jenkinsSource, /onUnmounted\([\s\S]*?wsService\.off\('SYNC_UPDATE', handleSyncUpdate\)/);
+assert.match(jenkinsSource, /finishSync\(serverId/);
+assert.match(jenkinsSource, /failCount|MAX_FAIL|MAX_POLL|timeout/);
+
 
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: {

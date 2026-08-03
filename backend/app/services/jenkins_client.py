@@ -27,7 +27,48 @@ def jenkins_datetime(timestamp_ms: Any) -> Optional[datetime]:
     return datetime.fromtimestamp(timestamp_ms / 1000)
 
 
+import threading
+
+class JenkinsApiTracker:
+    _lock = threading.Lock()
+    today_date: str = ""
+    today_count: int = 0
+    total_count: int = 0
+    last_request_at: Optional[datetime] = None
+    by_category: Dict[str, int] = {}
+
+    @classmethod
+    def record_request(cls, category: str = "general"):
+        with cls._lock:
+            current_today = datetime.now().strftime("%Y-%m-%d")
+            if cls.today_date != current_today:
+                cls.today_date = current_today
+                cls.today_count = 0
+            cls.today_count += 1
+            cls.total_count += 1
+            cls.last_request_at = datetime.now()
+            cls.by_category[category] = cls.by_category.get(category, 0) + 1
+
+    @classmethod
+    def get_stats(cls) -> Dict[str, Any]:
+        with cls._lock:
+            current_today = datetime.now().strftime("%Y-%m-%d")
+            t_count = cls.today_count if cls.today_date == current_today else 0
+            last_str = cls.last_request_at.strftime("%Y-%m-%d %H:%M:%S") if cls.last_request_at else None
+            return {
+                "today_count": t_count,
+                "total_count": cls.total_count,
+                "last_request_at": last_str,
+                "by_category": dict(cls.by_category)
+            }
+
+
 class SafeSession(requests.Session):
+    def request(self, method, url, **kwargs):
+        category = kwargs.pop("api_category", "general")
+        JenkinsApiTracker.record_request(category)
+        return super().request(method, url, **kwargs)
+
     def resolve_redirects(self, resp, req, **kwargs):
         if kwargs.get("yield_requests"):
             yield from super().resolve_redirects(resp, req, **kwargs)
@@ -123,7 +164,7 @@ class JenkinsClient:
         """
         try:
             url = urljoin(self.base_url, "api/json")
-            response = self.session.get(url, timeout=10)
+            response = self.session.get(url, timeout=10, api_category="health_check")
             if response.status_code == 200:
                 return True, "连接 Jenkins 成功"
             return False, f"HTTP 错误 {response.status_code}：{response.text[:200]}"

@@ -22,6 +22,7 @@ from app.services.jenkins_client import JenkinsClient
 router = APIRouter()
 
 _DASHBOARD_STATS_CACHE: Dict[str, Any] = {"timestamp": 0, "data": None}
+_JENKINS_HEALTH_CACHE: Dict[str, Any] = {"timestamp": 0, "data": []}
 
 @router.get("/dashboard/stats")
 def get_dashboard_stats(
@@ -30,7 +31,7 @@ def get_dashboard_stats(
     current_user: User = Depends(get_current_user)
 ):
     now_ts = datetime.now().timestamp()
-    if not force_refresh and _DASHBOARD_STATS_CACHE["data"] and (now_ts - _DASHBOARD_STATS_CACHE["timestamp"] < 5):
+    if not force_refresh and _DASHBOARD_STATS_CACHE["data"] and (now_ts - _DASHBOARD_STATS_CACHE["timestamp"] < 10):
         return _DASHBOARD_STATS_CACHE["data"]
 
     # Today's start and end times
@@ -72,21 +73,31 @@ def get_dashboard_stats(
         trend_failed.append(f_count)
         
     # 5. Jenkins Servers Connection Health Info
-    servers = db.query(JenkinsServer).all()
+    # Only perform real network API test if force_refresh is True or cache is empty
     server_health = []
-    
-    def check_health(s):
-        try:
-            client = JenkinsClient(s.url, s.username, s.api_token)
-            success, _ = client.test_connection()
-            return {"name": s.name, "status": "UP" if success else "DOWN"}
-        except Exception:
-            return {"name": s.name, "status": "DOWN"}
-        
-    if servers:
-        with ThreadPoolExecutor(max_workers=min(len(servers), 10)) as executor:
-            health_results = list(executor.map(check_health, servers))
-        server_health.extend(health_results)
+    if force_refresh or not _JENKINS_HEALTH_CACHE["data"]:
+        servers = db.query(JenkinsServer).all()
+        def check_health(s):
+            try:
+                client = JenkinsClient(s.url, s.username, s.api_token)
+                success, _ = client.test_connection()
+                return {"name": s.name, "status": "UP" if success else "DOWN"}
+            except Exception:
+                return {"name": s.name, "status": "DOWN"}
+
+        if servers:
+            with ThreadPoolExecutor(max_workers=min(len(servers), 10)) as executor:
+                health_results = list(executor.map(check_health, servers))
+            server_health.extend(health_results)
+        _JENKINS_HEALTH_CACHE["timestamp"] = now_ts
+        _JENKINS_HEALTH_CACHE["data"] = server_health
+    else:
+        # Fallback to cached health status without making ANY API requests to Jenkins
+        servers = db.query(JenkinsServer).all()
+        cached_map = {item["name"]: item["status"] for item in _JENKINS_HEALTH_CACHE["data"]}
+        for s in servers:
+            st = cached_map.get(s.name, "UP" if s.is_active else "DOWN")
+            server_health.append({"name": s.name, "status": st})
         
     # 6. Recent 10 history lines
     raw_histories = db.query(ReleaseHistory).order_by(desc(ReleaseHistory.created_at)).limit(10).all()
@@ -102,6 +113,9 @@ def get_dashboard_stats(
             "created_at": h.created_at
         })
         
+    from app.services.jenkins_client import JenkinsApiTracker
+    api_stats = JenkinsApiTracker.get_stats()
+
     res_data = {
         "stats": {
             "today_releases": today_count,
@@ -116,7 +130,8 @@ def get_dashboard_stats(
             "failed": trend_failed
         },
         "servers": server_health,
-        "recent_history": recent_histories
+        "recent_history": recent_histories,
+        "jenkins_api_stats": api_stats
     }
     _DASHBOARD_STATS_CACHE["timestamp"] = now_ts
     _DASHBOARD_STATS_CACHE["data"] = res_data
@@ -265,6 +280,14 @@ def set_system_config(
     db.commit()
     db.refresh(db_config)
     log_action(db, current_user, "SET_SYSTEM_CONFIG", get_client_ip(request), f"修改高级配置项: {config.config_key}")
+
+    if config.config_key in ("jenkins_auto_sync_enabled", "jenkins_auto_sync_time"):
+        try:
+            from app.services.scheduler import scheduler_manager
+            scheduler_manager.reload_jenkins_auto_sync_job()
+        except Exception as ex:
+            import loguru
+            loguru.logger.error(f"Failed to reload jenkins auto sync job: {ex}")
     
     # Return masked response to prevent leaking sensitive fields
     k_lower = db_config.config_key.lower()
@@ -389,6 +412,10 @@ def get_scheduler_info(
         "sync_external_builds": {
             "name": "外部 Jenkins 构建记录历史同步",
             "description": "自动同步并补充 Jenkins 侧外部独立触发的历史构建数据"
+        },
+        "auto_sync_jenkins_data": {
+            "name": "Jenkins 实例 View/Job 结构每日自动同步",
+            "description": "自动对所有启用中的 Jenkins 实例同步 Views 和 Jobs 结构信息"
         }
     }
 
@@ -469,6 +496,10 @@ def get_scheduler_info(
                 trig_desc = "每天 03:00 自动执行"
             elif sys_id == "sync_external_builds":
                 trig_desc = "每天 18:00 自动执行"
+            elif sys_id == "auto_sync_jenkins_data":
+                db_time = db.query(SystemConfig).filter(SystemConfig.config_key == "jenkins_auto_sync_time").first()
+                sync_t = db_time.config_value if db_time and db_time.config_value else "08:00"
+                trig_desc = f"每天 {sync_t} 自动执行"
 
             system_cron_tasks.append({
                 "job_id": sys_id,

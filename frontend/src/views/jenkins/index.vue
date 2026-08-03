@@ -31,6 +31,9 @@
         </div>
         <p class="mono">{{ server.url }}</p>
         <small>{{ server.description || '无描述' }}</small>
+        <small class="server-card__sync-time">
+          上次成功同步：{{ server.last_synced_at ? formatDateTime(server.last_synced_at) : '尚未同步' }}
+        </small>
         <div class="server-card__actions" @click.stop>
           <n-button size="tiny" secondary :loading="busyKey === `test-${server.id}`" @click="testConnection(server)">测试</n-button>
           <RefreshButton size="tiny" type="primary" secondary label="同步" :loading="busyKey === `sync-${server.id}` || syncingServers[server.id]" @click="syncServer(server)" />
@@ -155,7 +158,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   NAlert,
@@ -169,6 +172,7 @@ import {
   NSwitch,
   useDialog,
   useMessage,
+  useNotification,
 } from 'naive-ui';
 import type { FormInst, FormRules } from 'naive-ui';
 import RefreshButton from '../../components/RefreshButton.vue';
@@ -187,6 +191,7 @@ interface JenkinsServer {
   api_token?: string;
   description?: string | null;
   is_active: number;
+  last_synced_at?: string | null;
 }
 
 interface JenkinsView {
@@ -210,6 +215,7 @@ interface JenkinsJob {
 const router = useRouter();
 const message = useMessage();
 const dialog = useDialog();
+const notification = useNotification();
 const serverFormRef = ref<FormInst | null>(null);
 
 const loading = ref(false);
@@ -248,21 +254,108 @@ import { wsService } from '../../utils/websocket';
 
 // 同步状态管理
 const syncingServers = ref<Record<number, boolean>>({});
+const syncTimers: Record<number, any> = {};
+const syncFailCounts: Record<number, number> = {};
+const syncStartTimes: Record<number, number> = {};
+const MAX_FAIL_COUNT = 5;
+const SYNC_TIMEOUT_MS = 60000;
+
+function clearSyncTimer(serverId: number) {
+  if (syncTimers[serverId]) {
+    clearTimeout(syncTimers[serverId]);
+    delete syncTimers[serverId];
+  }
+  delete syncFailCounts[serverId];
+}
+
+async function refreshCurrentServerViewsAndJobs(serverId: number) {
+  const currentViewId = selectedViewId.value;
+  try {
+    const res = await request.get(`/jenkins/servers/${serverId}/views`);
+    views.value = res.data || [];
+
+    if (views.value.length > 0) {
+      const stillExists = views.value.some((v) => v.id === currentViewId);
+      if (currentViewId && stillExists) {
+        selectedViewId.value = currentViewId;
+        await loadJobs();
+      } else {
+        await selectView(views.value[0].id);
+      }
+    } else {
+      selectedViewId.value = null;
+      jobs.value = [];
+    }
+  } catch (err) {
+    console.error('静默刷新视图及 Jobs 失败:', err);
+  }
+}
+
+function finishSync(serverId: number, options?: { error?: string }) {
+  clearSyncTimer(serverId);
+  delete syncingServers.value[serverId];
+
+  if (busyKey.value === `sync-${serverId}`) {
+    busyKey.value = '';
+  }
+
+  if (options?.error) {
+    message.error(options.error);
+    return;
+  }
+
+  loadServers();
+
+  if (selectedServerId.value === serverId) {
+    refreshCurrentServerViewsAndJobs(serverId);
+  }
+
+  const serverName = servers.value.find((s) => s.id === serverId)?.name || 'Jenkins 实例';
+  notification.success({
+    title: 'Jenkins 数据同步完成',
+    content: `实例「${serverName}」后台数据及 View/Job 列表已成功同步并完成更新。`,
+    duration: 4000,
+  });
+}
 
 function handleSyncUpdate(data: any) {
   if (data && data.server_id) {
-    delete syncingServers.value[data.server_id];
-    if (selectedServerId.value === data.server_id) {
-      selectServer(data.server_id);
-    }
-    message.success('数据同步已完成');
+    finishSync(data.server_id);
   }
 }
 
 function pollSyncStatus(serverId: number) {
+  clearSyncTimer(serverId);
   syncingServers.value[serverId] = true;
-  // 注册 WS 监听
-  wsService.on('SYNC_UPDATE', handleSyncUpdate);
+  syncFailCounts[serverId] = 0;
+  syncStartTimes[serverId] = Date.now();
+
+  const queryStatus = async () => {
+    if (Date.now() - (syncStartTimes[serverId] || Date.now()) > SYNC_TIMEOUT_MS) {
+      finishSync(serverId, { error: '无法获取同步状态，请重试' });
+      return;
+    }
+
+    try {
+      const res = await request.get(`/jenkins/servers/${serverId}/sync/status`);
+      syncFailCounts[serverId] = 0;
+
+      if (!res.data || !res.data.syncing) {
+        finishSync(serverId);
+      } else if (syncingServers.value[serverId]) {
+        syncTimers[serverId] = setTimeout(queryStatus, 2000);
+      }
+    } catch (err) {
+      syncFailCounts[serverId] = (syncFailCounts[serverId] || 0) + 1;
+      if (syncFailCounts[serverId] >= MAX_FAIL_COUNT) {
+        finishSync(serverId, { error: '无法获取同步状态，请重试' });
+      } else if (syncingServers.value[serverId]) {
+        syncTimers[serverId] = setTimeout(queryStatus, 2000);
+      }
+    }
+  };
+
+  queryStatus();
 }
 
 async function checkAndResumeSyncPolling(serverId: number) {
@@ -275,6 +368,18 @@ async function checkAndResumeSyncPolling(serverId: number) {
     // 忽略异常
   }
 }
+
+onMounted(() => {
+  wsService.on('SYNC_UPDATE', handleSyncUpdate);
+  loadServers();
+});
+
+onUnmounted(() => {
+  wsService.off('SYNC_UPDATE', handleSyncUpdate);
+  Object.keys(syncTimers).forEach((id) => {
+    clearSyncTimer(Number(id));
+  });
+});
 
 const serverRules: FormRules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
@@ -399,9 +504,14 @@ function testConnection(server: JenkinsServer) {
 
 function syncServer(server: JenkinsServer) {
   runServerAction(`sync-${server.id}`, async () => {
-    const res = await request.post(`/jenkins/servers/${server.id}/sync`);
-    message.success(res.data.message || '已触发后台同步');
-    pollSyncStatus(server.id);
+    try {
+      const res = await request.post(`/jenkins/servers/${server.id}/sync`);
+      message.success(res.data?.message || '已触发后台同步');
+      pollSyncStatus(server.id);
+    } catch (err: any) {
+      finishSync(server.id, { error: err.message || '触发同步失败' });
+      throw err;
+    }
   });
 }
 
@@ -535,7 +645,7 @@ async function submitQuickRun() {
   }
 }
 
-onMounted(loadServers);
+
 </script>
 
 <style scoped>

@@ -66,6 +66,7 @@ class JenkinsServerResponse(JenkinsServerBase):
     api_token: str
     created_at: datetime
     updated_at: datetime
+    last_synced_at: Optional[datetime] = None
 
     @field_validator("username", mode="before")
     @classmethod

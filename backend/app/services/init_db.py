@@ -25,6 +25,16 @@ def ensure_release_plan_preflight_columns(engine) -> None:
                 connection.execute(text(f"ALTER TABLE release_plan ADD COLUMN {name} {definition}"))
 
 
+def ensure_jenkins_last_synced_at_column(engine) -> None:
+    inspector = inspect(engine)
+    if "jenkins_server" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("jenkins_server")}
+    if "last_synced_at" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE jenkins_server ADD COLUMN last_synced_at DATETIME NULL"))
+
+
 def ensure_jenkins_consistency_schema(engine) -> None:
     inspector = inspect(engine)
     index_name = "uix_release_history_build_identity"
@@ -125,6 +135,7 @@ def init_db() -> None:
         Base.metadata.create_all(bind=sync_engine)
         ensure_release_plan_preflight_columns(sync_engine)
         ensure_jenkins_consistency_schema(sync_engine)
+        ensure_jenkins_last_synced_at_column(sync_engine)
         logger.info("Database tables created or verified.")
 
         if sync_engine.dialect.name == "mysql":

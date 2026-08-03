@@ -303,3 +303,21 @@ def sync_external_builds(server_id: Optional[int] = None, job_name: Optional[str
             manager.broadcast_event("HISTORY_UPDATE")
         except Exception:
             pass
+
+
+def sync_all_active_jenkins_servers():
+    """Scheduled task: auto sync View and Job metadata for all active Jenkins servers."""
+    from app.api.jenkins import sync_jenkins_data
+    db = SyncSessionLocal()
+    try:
+        servers = db.query(JenkinsServer).filter(JenkinsServer.is_active == 1).all()
+        for server in servers:
+            try:
+                sync_jenkins_data(server.id)
+                logger.info(f"Auto-synced Views/Jobs for Jenkins server {server.name} (#{server.id})")
+            except Exception as e:
+                logger.error(f"Auto-sync Views/Jobs failed for server {server.name} (#{server.id}): {str(e)}")
+    except Exception as exc:
+        logger.error(f"Error in sync_all_active_jenkins_servers task: {str(exc)}")
+    finally:
+        db.close()

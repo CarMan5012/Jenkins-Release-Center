@@ -393,6 +393,26 @@
                   <span style="font-size: 12px; color: #6b7280;">个</span>
                 </div>
               </n-form-item>
+              <n-form-item>
+                <template #label>
+                  <span style="white-space: nowrap; display: inline-flex; align-items: center;">
+                    <span>Jenkins 结构每日自动同步</span>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <span class="help-icon">?</span>
+                      </template>
+                      <span>开启后，后台调度引擎将在每日固定时刻自动同步全量启用中 Jenkins 实例的 View 与 Job 结构信息。</span>
+                    </n-tooltip>
+                  </span>
+                </template>
+                <div style="display: flex; align-items: center; gap: 16px;">
+                  <n-switch v-model:value="jenkinsAutoSyncEnabled" :checked-value="1" :unchecked-value="0" />
+                  <div v-if="jenkinsAutoSyncEnabled" style="display: flex; align-items: center; gap: 6px;">
+                    <span style="font-size: 13px;" class="muted">每日执行时间：</span>
+                    <n-time-picker v-model:formatted-value="jenkinsAutoSyncTime" value-format="HH:mm" format="HH:mm" size="small" style="width: 120px;" placeholder="08:00" />
+                  </div>
+                </div>
+              </n-form-item>
               <div style="margin-top: 10px; display: flex; justify-content: flex-start;">
                 <UiverseButton variant="primary" size="sm" :loading="submitAdvancedLoading" @click="submitAdvancedSettings">
                   保存设置
@@ -479,6 +499,7 @@ import {
   NTabPane,
   NTabs,
   NTag,
+  NTimePicker,
   NTooltip,
   useDialog,
   useMessage,
@@ -821,6 +842,8 @@ const auditRetention = ref<number | null>(30);
 const historyRetention = ref<number | null>(30);
 const planRetention = ref<number | null>(30);
 const backupRetention = ref<number | null>(10);
+const jenkinsAutoSyncEnabled = ref<number>(1);
+const jenkinsAutoSyncTime = ref<string>('08:00');
 const systemUrl = ref<string>('');
 const submitAdvancedLoading = ref(false);
 
@@ -848,6 +871,12 @@ async function loadSystemConfigs() {
 
     const backupCount = configs.find((c: any) => c.config_key === 'jenkins_backup_retention_count');
     backupRetention.value = backupCount ? parseInt(backupCount.config_value) : 10;
+
+    const autoSyncEnabled = configs.find((c: any) => c.config_key === 'jenkins_auto_sync_enabled');
+    jenkinsAutoSyncEnabled.value = autoSyncEnabled ? parseInt(autoSyncEnabled.config_value) : 1;
+
+    const autoSyncTime = configs.find((c: any) => c.config_key === 'jenkins_auto_sync_time');
+    jenkinsAutoSyncTime.value = autoSyncTime && autoSyncTime.config_value ? autoSyncTime.config_value : '08:00';
     
     const sysUrl = configs.find((c: any) => c.config_key === 'system_url');
     systemUrl.value = sysUrl ? sysUrl.config_value : '';
@@ -882,12 +911,23 @@ async function submitAdvancedSettings() {
         description: 'Jenkins 备份最大保留数量 (个，0表示永久保留)'
       }),
       request.post('/system/configs', {
+        config_key: 'jenkins_auto_sync_enabled',
+        config_value: String(jenkinsAutoSyncEnabled.value),
+        description: 'Jenkins 实例 View/Job 结构每日自动同步开关 (1启用, 0禁用)'
+      }),
+      request.post('/system/configs', {
+        config_key: 'jenkins_auto_sync_time',
+        config_value: (jenkinsAutoSyncTime.value || '08:00').trim(),
+        description: 'Jenkins 实例 View/Job 结构每日自动同步触发时间 (HH:MM)'
+      }),
+      request.post('/system/configs', {
         config_key: 'system_url',
         config_value: systemUrl.value.trim(),
         description: '系统外部访问地址前缀 (供第三方通知渠道如钉钉回调使用)'
       })
     ]);
     message.success('高级设置保存成功');
+    await loadSchedulerInfo();
   } catch (err: any) {
     message.error(err.message || '高级设置保存失败');
   } finally {

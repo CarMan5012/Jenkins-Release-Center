@@ -107,6 +107,47 @@ class SchedulerManager:
             )
             logger.info("Registered auto_backup_jenkins_servers daily 02:00 cron task.")
 
+            # Register/reload daily auto sync Views/Jobs task
+            self.reload_jenkins_auto_sync_job()
+
+    def reload_jenkins_auto_sync_job(self):
+        """Reload daily auto-sync for Jenkins servers View/Job metadata based on SystemConfig."""
+        db = SyncSessionLocal()
+        try:
+            from app.models.system import SystemConfig
+            from app.services.jenkins_sync_task import sync_all_active_jenkins_servers
+
+            enabled_config = db.query(SystemConfig).filter(SystemConfig.config_key == "jenkins_auto_sync_enabled").first()
+            time_config = db.query(SystemConfig).filter(SystemConfig.config_key == "jenkins_auto_sync_time").first()
+
+            is_enabled = enabled_config.config_value == "1" if enabled_config else True
+            sync_time_str = time_config.config_value if time_config and time_config.config_value else "08:00"
+
+            job_id = "auto_sync_jenkins_data"
+
+            if is_enabled:
+                try:
+                    hour, minute = map(int, sync_time_str.strip().split(":"))
+                    self.scheduler.add_job(
+                        sync_all_active_jenkins_servers,
+                        'cron',
+                        hour=hour,
+                        minute=minute,
+                        id=job_id,
+                        replace_existing=True
+                    )
+                    logger.info(f"Registered auto_sync_jenkins_data daily {sync_time_str} cron task.")
+                except Exception as e:
+                    logger.error(f"Failed to parse or add auto_sync_jenkins_data cron job ({sync_time_str}): {e}")
+            else:
+                if self.scheduler.get_job(job_id):
+                    self.scheduler.remove_job(job_id)
+                    logger.info("Removed auto_sync_jenkins_data cron task (disabled).")
+        except Exception as e:
+            logger.error(f"Error reloading jenkins auto sync job: {e}")
+        finally:
+            db.close()
+
     def shutdown(self):
         if self.scheduler.running:
             self.scheduler.shutdown()

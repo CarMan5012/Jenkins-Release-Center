@@ -17,6 +17,7 @@ class JenkinsServer(Base):
     is_active: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     views: Mapped[list["JenkinsView"]] = relationship("JenkinsView", back_populates="server", cascade="all, delete-orphan")
     jobs: Mapped[list["JenkinsJob"]] = relationship("JenkinsJob", back_populates="server", cascade="all, delete-orphan")
