@@ -77,6 +77,16 @@
                 <div class="cell-actions">
                   <n-button size="tiny" secondary @click="openLogs(item)">查看日志</n-button>
                   <n-button v-if="activeTab === 'system'" size="tiny" secondary :disabled="!item.plan_id" @click="router.push(`/release/${item.plan_id}`)">详情</n-button>
+                  <n-button
+                    v-if="activeTab === 'external' && ['BUILDING', 'QUEUED', 'RUNNING'].includes(item.status || '')"
+                    size="tiny"
+                    type="error"
+                    secondary
+                    :loading="busyKey === `stop-${item.id}`"
+                    @click="stopBuild(item)"
+                  >
+                    终止
+                  </n-button>
                 </div>
               </td>
             </tr>
@@ -131,6 +141,30 @@ const pageLoading = ref(false);
 const headerRefreshLoading = ref(false);
 const queryLoading = ref(false);
 const resetSeqLoading = ref(false);
+const busyKey = ref('');
+
+function stopBuild(item: ReleaseHistory) {
+  const buildStr = item.build_number ? ` #${item.build_number}` : '';
+  const targetName = `${item.job_name || '任务'}${buildStr}`;
+  dialog.warning({
+    title: '终止外部构建',
+    content: `您确定要终止 ${targetName} 吗？`,
+    positiveText: '确认终止',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      busyKey.value = `stop-${item.id}`;
+      try {
+        const res = await request.post(`/history/${item.id}/stop`);
+        message.success(res.data?.message || `构建 ${targetName} 已成功终止`);
+        await fetchHistories(false);
+      } catch (err: any) {
+        message.error(err.message || '终止构建失败');
+      } finally {
+        busyKey.value = '';
+      }
+    },
+  });
+}
 
 function confirmResetSequence() {
   dialog.warning({
@@ -165,7 +199,7 @@ const activeHistory = ref<ReleaseHistory | null>(null);
 const activeTab = ref<'system' | 'external'>('system');
 
 function handleHistoryUpdate() {
-  fetchHistories(false);
+  fetchHistories(false, 'silent');
 }
 
 const statusOptions = [
@@ -173,14 +207,44 @@ const statusOptions = [
   { label: '失败', value: 'FAILED' },
 ];
 
+let pollIntervalTimer: any = null;
+
+function clearSyncPollTimer() {
+  if (pollIntervalTimer) {
+    clearInterval(pollIntervalTimer);
+    pollIntervalTimer = null;
+  }
+}
+
+function startExternalSyncPolling() {
+  clearSyncPollTimer();
+  let count = 0;
+  pollIntervalTimer = setInterval(async () => {
+    count++;
+    if (count > 5 || activeTab.value !== 'external') {
+      clearSyncPollTimer();
+      return;
+    }
+    try {
+      await request.post('/history/sync', null, {
+        params: { job_name: queryJobName.value || undefined }
+      });
+      await fetchHistories(false, 'silent');
+    } catch {
+      // Ignore background sync errors
+    }
+  }, 2000);
+}
+
 async function onTabChange() {
+  clearSyncPollTimer();
   fetchHistories(true);
   if (activeTab.value === 'external') {
     try {
       await request.post('/history/sync', null, {
         params: { job_name: queryJobName.value || undefined }
       });
-      await fetchHistories(false);
+      await fetchHistories(false, 'silent');
     } catch {
       // Ignore background sync errors on tab click
     }
@@ -202,7 +266,7 @@ async function syncExternalHistories() {
   }
 }
 
-async function fetchHistories(resetPage = false, trigger?: 'page' | 'header' | 'query') {
+async function fetchHistories(resetPage = false, trigger?: 'page' | 'header' | 'query' | 'silent') {
   if (resetPage) page.value = 1;
   const buttonLoading = trigger === 'header'
     ? headerRefreshLoading
@@ -210,7 +274,7 @@ async function fetchHistories(resetPage = false, trigger?: 'page' | 'header' | '
       ? queryLoading
       : null;
   if (buttonLoading) buttonLoading.value = true;
-  else pageLoading.value = true;
+  else if (trigger !== 'silent') pageLoading.value = true;
   error.value = '';
   try {
     const res = await request.get('/history', {
@@ -230,12 +294,14 @@ async function fetchHistories(resetPage = false, trigger?: 'page' | 'header' | '
       message.success('查询成功');
     }
   } catch (err: any) {
-    error.value = err.message || '历史记录加载失败';
-    message.error(err.message || '刷新失败');
+    if (trigger !== 'silent') {
+      error.value = err.message || '历史记录加载失败';
+      message.error(err.message || '刷新失败');
+    }
   } finally {
     if (buttonLoading) {
       buttonLoading.value = false;
-    } else {
+    } else if (trigger !== 'silent') {
       pageLoading.value = false;
     }
   }
@@ -250,6 +316,9 @@ watch(() => route.query.job, (value) => {
   if (typeof value === 'string') {
     queryJobName.value = value;
     fetchHistories(true);
+    if (activeTab.value === 'external') {
+      startExternalSyncPolling();
+    }
   }
 });
 
@@ -261,19 +330,20 @@ onMounted(async () => {
   
   if (activeTab.value === 'external') {
     try {
-      await new Promise((resolve) => setTimeout(resolve, 800));
       await request.post('/history/sync', null, {
         params: { job_name: queryJobName.value || undefined }
       });
     } catch {
       // Ignore background sync errors on mount
     }
+    startExternalSyncPolling();
   }
   await fetchHistories(true);
   wsService.on('HISTORY_UPDATE', handleHistoryUpdate);
 });
 
 onUnmounted(() => {
+  clearSyncPollTimer();
   wsService.off('HISTORY_UPDATE', handleHistoryUpdate);
 });
 </script>

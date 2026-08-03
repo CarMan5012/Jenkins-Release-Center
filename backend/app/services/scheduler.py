@@ -1,6 +1,10 @@
+import re
+from apscheduler.events import EVENT_JOB_MISSED
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from app.core.config import settings
+from app.core.database import SyncSessionLocal
+from app.models.release import ReleasePlan, ReleaseTask
 from loguru import logger
 from datetime import datetime
 
@@ -13,6 +17,43 @@ class SchedulerManager:
         }
 
         self.scheduler = BackgroundScheduler(jobstores=self.jobstores)
+        self.scheduler.add_listener(
+            self.handle_missed_job,
+            EVENT_JOB_MISSED,
+        )
+
+    def handle_missed_job(self, event):
+        match = re.fullmatch(
+            r"plan_(\d+)_task_(\d+)",
+            event.job_id,
+        )
+        if not match:
+            return
+
+        plan_id, task_id = map(int, match.groups())
+        db = SyncSessionLocal()
+        try:
+            task = db.get(ReleaseTask, task_id)
+            if (
+                not task
+                or task.plan_id != plan_id
+                or task.status != "WAITING"
+            ):
+                return
+
+            task.status = "FAILED"
+            task.error_message = (
+                "计划执行时间已错过，超过 300 秒容错窗口"
+            )
+            task.finished_at = datetime.now()
+            db.commit()
+
+            from app.services.release_service import (
+                handle_pipeline_failure,
+            )
+            handle_pipeline_failure(db, plan_id, task_id)
+        finally:
+            db.close()
 
     def start(self):
         if not self.scheduler.running:

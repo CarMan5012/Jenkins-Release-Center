@@ -16,6 +16,7 @@ from app.services.scheduler import scheduler_manager
 from app.services.release_preflight import preflight_block_reason, run_release_preflight
 from app.services.release_service import execute_release_task
 
+from loguru import logger
 from app.services.deps_helper import get_client_ip, normalize_idempotency_key
 
 router = APIRouter()
@@ -472,9 +473,10 @@ def preflight_plan(
     if plan.status == "FAILED":
         plan.status = "WAITING"
         for t in plan.tasks:
-            if t.status == "FAILED":
+            if t.status in ("FAILED", "SKIPPED"):
                 t.status = "WAITING"
                 t.error_message = None
+                t.finished_at = None
                 t.jenkins_queue_id = None
                 t.build_number = None
                 t.build_url = None
@@ -505,25 +507,49 @@ def cancel_plan(
     from app.models.jenkins import JenkinsServer
     from app.services.jenkins_client import JenkinsClient
 
-    # Stop remote builds before reporting local cancellation success.
-    for t in plan.tasks:
-        if t.status in ("WAITING", "QUEUED", "BUILDING", "RUNNING"):
-            server = db.get(JenkinsServer, t.server_id)
-            if server:
-                client = JenkinsClient(server.url, server.username, server.api_token)
-                # 1. 尝试停止记录在案的构建号
-                if t.build_number is not None:
-                    try:
-                        client.stop_build(t.job_name, t.build_number)
-                    except Exception as error:
-                        logger.warning(f"停止记录的 Jenkins 构建 #{t.build_number} 失败: {error}")
+    remote_errors = []
+    active_tasks = [
+        task
+        for task in plan.tasks
+        if task.status in ("WAITING", "QUEUED", "BUILDING", "RUNNING")
+    ]
 
-            scheduler_manager.remove_release_job(plan.id, t.id)
-            t.status = "CANCELLED"
-            t.finished_at = datetime.now()
-            
-    plan.status = "CANCELLED"
+    for task in active_tasks:
+        try:
+            server = db.get(JenkinsServer, task.server_id)
+            if not server:
+                raise RuntimeError("Jenkins server missing")
+
+            client = JenkinsClient(
+                server.url,
+                server.username,
+                server.api_token,
+            )
+            if task.build_number is not None:
+                client.stop_build(task.job_name, task.build_number)
+            elif task.jenkins_queue_id is not None:
+                client.cancel_queue_item(task.jenkins_queue_id)
+
+            scheduler_manager.remove_release_job(plan.id, task.id)
+            task.status = "CANCELLED"
+            task.finished_at = datetime.now()
+            task.error_message = None
+        except Exception as error:
+            logger.warning(
+                f"Failed to cancel Jenkins task {task.id}: {error}"
+            )
+            task.error_message = f"Cancel failed: {error}"
+            remote_errors.append(f"{task.job_name}: {error}")
+
+    plan.status = "CANCELLED" if not remote_errors else "RUNNING"
     db.commit()
+
+    if remote_errors:
+        raise HTTPException(
+            status_code=502,
+            detail="; ".join(remote_errors),
+        )
+
     log_action(db, current_user, "CANCEL_RELEASE_PLAN", get_client_ip(request), f"Cancelled release plan: {plan.name}")
     return {"success": True, "message": "发布计划已成功停止"}
 
@@ -695,6 +721,21 @@ def retry_single_task(
     task.build_url = None
     task.console_url = None
     plan.status = "RUNNING"
+
+    if plan.type == "PIPELINE":
+        for downstream in plan.tasks:
+            if (
+                downstream.sequence > task.sequence
+                and downstream.status == "SKIPPED"
+            ):
+                downstream.status = "WAITING"
+                downstream.error_message = None
+                downstream.finished_at = None
+                downstream.jenkins_queue_id = None
+                downstream.build_number = None
+                downstream.build_url = None
+                downstream.console_url = None
+
     db.commit()
 
     # 移除可能存在的定时调度项

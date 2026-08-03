@@ -1,7 +1,8 @@
+import pytest
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from sqlalchemy import create_engine, update
 from sqlalchemy.orm import sessionmaker
 
@@ -288,4 +289,77 @@ def test_preflight_failed_plan_clears_previous_jenkins_identity():
     assert task.build_url is None
     assert task.console_url is None
 
-    assert task.console_url is None
+
+@patch("app.api.release.log_action")
+@patch("app.api.release.scheduler_manager.remove_release_job")
+@patch.object(JenkinsClient, "cancel_queue_item")
+def test_cancel_queued_plan_cancels_remote_queue(
+    cancel_queue,
+    _remove_job,
+    _log_action,
+):
+    db, user, plan, task = session_with_running_task()
+    task.status = "QUEUED"
+    task.jenkins_queue_id = 1001
+    task.build_number = None
+    db.commit()
+
+    result = cancel_plan(request(), plan.id, db, user)
+
+    cancel_queue.assert_called_once_with(1001)
+    assert result["success"] is True
+    assert db.get(ReleaseTask, task.id).status == "CANCELLED"
+
+
+@patch("app.api.release.log_action")
+@patch.object(
+    JenkinsClient,
+    "stop_build",
+    side_effect=RuntimeError("Jenkins down"),
+)
+def test_cancel_failure_keeps_task_active_and_returns_502(
+    _stop_build,
+    _log_action,
+):
+    db, user, plan, task = session_with_running_task()
+
+    with pytest.raises(HTTPException) as error:
+        cancel_plan(request(), plan.id, db, user)
+
+    assert error.value.status_code == 502
+    assert db.get(ReleaseTask, task.id).status == "RUNNING"
+    assert db.get(ReleasePlan, plan.id).status == "RUNNING"
+
+
+@patch("app.api.release.log_action")
+@patch("app.api.release.scheduler_manager.remove_release_job")
+@patch.object(JenkinsClient, "stop_build")
+def test_cancel_partial_failure_keeps_plan_active_and_returns_502(
+    stop_build,
+    _remove_job,
+    _log_action,
+):
+    db, user, plan, task1 = session_with_running_task()
+    task2 = ReleaseTask(
+        plan_id=plan.id,
+        server_id=task1.server_id,
+        job_name="deploy-2",
+        branch="main",
+        sequence=1,
+        status="RUNNING",
+        build_number=43,
+        started_at=datetime.now(),
+    )
+    db.add(task2)
+    db.commit()
+
+    stop_build.side_effect = [None, RuntimeError("Jenkins node unreachable")]
+
+    with pytest.raises(HTTPException) as error:
+        cancel_plan(request(), plan.id, db, user)
+
+    assert error.value.status_code == 502
+    assert db.get(ReleaseTask, task1.id).status == "CANCELLED"
+    assert db.get(ReleaseTask, task2.id).status == "RUNNING"
+    assert db.get(ReleasePlan, plan.id).status == "RUNNING"
+

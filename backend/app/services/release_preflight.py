@@ -108,7 +108,11 @@ def _server_probe(client: JenkinsClient) -> dict:
             if raw_url.strip():
                 remote_origin = url_origin(raw_url)
                 if not is_compatible_origin(remote_origin, configured):
-                    pass
+                    return _check(
+                        "origin",
+                        "FAILED",
+                        "Jenkins 根地址与配置地址的 Origin 不一致",
+                    )
     except (TypeError, ValueError):
         return _check("origin", "FAILED", "Jenkins Origin 不一致")
 

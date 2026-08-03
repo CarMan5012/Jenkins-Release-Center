@@ -709,6 +709,7 @@ def execute_jenkins_backup(server_id: int, backup_id: int):
         # 1. Fetch recursively all jobs (raise errors if API request fails, e.g., 401 Unauthorized)
         all_jobs = get_all_jobs_recursive(session, base_url, raise_errors=True)
         all_parsed_info = {}
+        failed_jobs = []
         backed_up_count = 0
 
         # 2. Download and Parse each job
@@ -719,55 +720,63 @@ def execute_jenkins_backup(server_id: int, backup_id: int):
             except ValueError as error:
                 logging.warning("Skipping Jenkins job with unsafe path %r: %s", job_name, error)
                 continue
-            job_url = job["url"]
 
-            # Pull config.xml
-            config_url = urljoin(job_url.rstrip('/') + '/', "config.xml")
             try:
+                job_url = job["url"]
+
+                # Pull config.xml
+                config_url = urljoin(job_url.rstrip('/') + '/', "config.xml")
                 config_res = jenkins_request(session, 'GET', config_url, base_url, timeout=15)
                 if config_res.status_code != 200:
-                    continue
+                    raise RuntimeError(f"config.xml returned HTTP {config_res.status_code}")
                 config_xml = config_res.text
-            except Exception:
-                continue
 
-            # Parse config xml
-            parser = JenkinsConfigParser(config_xml)
-            parsed_info = parser.parse()
-            if not parsed_info:
-                continue
+                # Parse config xml
+                parser = JenkinsConfigParser(config_xml)
+                parsed_info = parser.parse()
+                if not parsed_info:
+                    raise RuntimeError("config.xml could not be parsed")
 
-            all_parsed_info[job_name] = parsed_info
-            
-            # Save into temporary files directory structure
-            os.makedirs(job_dir, exist_ok=True)
+                all_parsed_info[job_name] = parsed_info
+                
+                # Save into temporary files directory structure
+                os.makedirs(job_dir, exist_ok=True)
 
-            # Write config.xml
-            with open(os.path.join(job_dir, "config.xml"), "w", encoding="utf-8") as f:
-                f.write(config_xml)
+                # Write config.xml
+                with open(os.path.join(job_dir, "config.xml"), "w", encoding="utf-8") as f:
+                    f.write(config_xml)
 
-            # Write info.json
-            with open(os.path.join(job_dir, "info.json"), "w", encoding="utf-8") as f:
-                json.dump(parsed_info, f, indent=4, ensure_ascii=False)
+                # Write info.json
+                with open(os.path.join(job_dir, "info.json"), "w", encoding="utf-8") as f:
+                    json.dump(parsed_info, f, indent=4, ensure_ascii=False)
 
-            # Extract shell scripting steps
-            build_steps = parsed_info.get("build_steps") or []
-            shell_steps = [step for step in build_steps if step.get("type") == "shell" and step.get("script")]
-            if len(shell_steps) == 1:
-                with open(os.path.join(job_dir, "build.sh"), "w", encoding="utf-8", newline="\n") as f:
-                    f.write(shell_steps[0]["script"])
-            elif len(shell_steps) > 1:
-                for idx, step in enumerate(shell_steps, 1):
-                    with open(os.path.join(job_dir, f"build_step_{idx}.sh"), "w", encoding="utf-8", newline="\n") as f:
-                        f.write(step["script"])
+                # Extract shell scripting steps
+                build_steps = parsed_info.get("build_steps") or []
+                shell_steps = [step for step in build_steps if step.get("type") == "shell" and step.get("script")]
+                if len(shell_steps) == 1:
+                    with open(os.path.join(job_dir, "build.sh"), "w", encoding="utf-8", newline="\n") as f:
+                        f.write(shell_steps[0]["script"])
+                elif len(shell_steps) > 1:
+                    for idx, step in enumerate(shell_steps, 1):
+                        with open(os.path.join(job_dir, f"build_step_{idx}.sh"), "w", encoding="utf-8", newline="\n") as f:
+                            f.write(step["script"])
 
-            # Extract inline pipelines
-            pipeline = parsed_info.get("pipeline")
-            if pipeline and pipeline.get("type") == "inline" and pipeline.get("script"):
-                with open(os.path.join(job_dir, "Jenkinsfile"), "w", encoding="utf-8", newline="\n") as f:
-                    f.write(pipeline["script"])
+                # Extract inline pipelines
+                pipeline = parsed_info.get("pipeline")
+                if pipeline and pipeline.get("type") == "inline" and pipeline.get("script"):
+                    with open(os.path.join(job_dir, "Jenkinsfile"), "w", encoding="utf-8", newline="\n") as f:
+                        f.write(pipeline["script"])
 
-            backed_up_count += 1
+                backed_up_count += 1
+            except Exception as error:
+                failed_jobs.append(f"{job_name}: {error}")
+
+        backup_record.job_count = backed_up_count
+        if failed_jobs:
+            raise RuntimeError(
+                "Incomplete Jenkins backup: "
+                + "; ".join(failed_jobs)
+            )
 
         tool_installations = fetch_tool_installations(session, base_url)
         credential_ids = {

@@ -61,6 +61,29 @@ def test_preflight_block_reason_fails_closed_for_unknown_status():
     assert preflight_block_reason(ReleasePlan(preflight_status="UNKNOWN")) == "发布前检查状态异常"
 
 
+def test_preflight_fails_when_jenkins_root_origin_mismatches(db, monkeypatch):
+    plan, _ = persist_plan(db, server_url="https://jenkins.example/")
+    
+    def responder(url):
+        if url.endswith("api/json?tree=url") and "/job/" not in url:
+            return FakeResponse(payload={"url": "https://other.example/"})
+        if url == "https://jenkins.example":
+            return FakeResponse()
+        return FakeResponse(payload={"name": "deploy"})
+
+    install_client(monkeypatch, responder)
+    res_plan = release_preflight.run_release_preflight(db, plan)
+
+    assert res_plan.preflight_status == "FAILED"
+    result = res_plan.preflight_result or {}
+    tasks = result.get("tasks", [])
+    all_checks = [check for task in tasks for check in task.get("checks", [])]
+    assert any(
+        "origin" in check["message"].lower()
+        for check in all_checks
+    )
+
+
 class FakeResponse:
     def __init__(self, status_code=200, payload=None, headers=None):
         self.status_code = status_code

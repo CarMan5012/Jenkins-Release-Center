@@ -89,7 +89,7 @@
       <div v-if="currentStep === 1" class="wizard-section">
         <n-form label-placement="left" label-align="right" label-width="100">
           <n-form-item label="计划名称" required>
-            <n-input v-model:value="wizardForm.name" placeholder="例如 prod-api-2026.07.09" />
+            <n-input v-model:value="wizardForm.name" placeholder="例如：正式环境-发布-xxxx" />
           </n-form-item>
           <n-form-item label="执行类型" required>
             <n-select v-model:value="wizardForm.type" :options="typeOptions.filter((item) => item.value !== 'ALL')" />
@@ -656,7 +656,7 @@ async function onTaskServerChange(value: number, index: number) {
   taskBranchOptions.value[index] = [];
   const server = servers.value.find((item) => item.id === value);
   if (server && !server.is_active) {
-    message.warning('该 Jenkins 实例已被禁用，请先启用后再选择');
+    message.warning('该 Jenkins 实例已被禁用，请先启用后再选择。');
     task.server_id = null;
     return;
   }

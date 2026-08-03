@@ -244,28 +244,44 @@ class JenkinsClient:
         while time.time() - last_response_time < timeout:
             try:
                 response = self.session.get(api_url, timeout=5)
-                if response.status_code == 200:
-                    data = response.json()
-                    executable = data.get("executable")
-                    if executable:
-                        build_number = executable.get("number")
-                        if build_number is not None:
-                            return build_number
-                    if data.get("cancelled", False):
-                        raise Exception("The build task in Jenkins queue was cancelled.")
-                    last_response_time = time.time()
-                    why = data.get("why", "")
-                    if why:
-                        logger.info(f"Build pending in queue: {why}")
-                    if callable(on_poll):
-                        try:
-                            on_poll(why)
-                        except Exception as cb_err:
-                            logger.debug(f"on_poll callback failed: {str(cb_err)}")
-            except Exception as e:
-                logger.warning(f"Error querying Jenkins queue item: {str(e)}")
+            except requests.RequestException as error:
+                logger.warning(f"Error querying Jenkins queue item: {error}")
+                time.sleep(3)
+                continue
+
+            if response.status_code == 200:
+                data = response.json()
+                executable = data.get("executable")
+                if executable and executable.get("number") is not None:
+                    return executable["number"]
+                if data.get("cancelled", False):
+                    raise RuntimeError("The build task in Jenkins queue was cancelled.")
+                last_response_time = time.time()
+                why = data.get("why", "")
+                if why:
+                    logger.info(f"Build pending in queue: {why}")
+                if callable(on_poll):
+                    on_poll(why)
             time.sleep(3)
-        raise Exception(f"Timeout ({timeout}s) without a valid queue response. Queue URL: {queue_url}")
+        raise RuntimeError(f"Timeout ({timeout}s) without a valid queue response. Queue URL: {queue_url}")
+
+    def cancel_queue_item(self, queue_id: int) -> None:
+        url = urljoin(self.base_url, "queue/cancelItem")
+        response = self.session.post(
+            url,
+            params={"id": queue_id},
+            headers=self.get_crumb_headers(),
+            timeout=10,
+            allow_redirects=False,
+        )
+        if not (
+            200 <= response.status_code < 300
+            or response.status_code == 302
+        ):
+            raise RuntimeError(
+                "Failed to cancel queue item: "
+                f"HTTP {response.status_code} - {response.text}"
+            )
 
     def stop_build(self, job_name: str, build_number: int) -> None:
         job_path = "/".join([f"job/{quote(part)}" for part in job_name.split("/")])

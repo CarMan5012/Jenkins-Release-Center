@@ -825,3 +825,88 @@ def test_external_sync_preserves_archived_log_when_fetch_is_incomplete(
     run_external_sync(db, {"http://jenkins-1.example": client})
 
     assert db.query(ReleaseHistory).one().logs == "good"
+
+
+def test_consecutive_404_build_status_fails_task_and_plan():
+    db = external_history_session()
+    user = User(username="op", password_hash="x")
+    db.add(user)
+    db.flush()
+    plan = ReleasePlan(name="p", type="IMMEDIATE", status="WAITING", preflight_status="PASSED", creator_id=user.id)
+    db.add(plan)
+    db.flush()
+    task = ReleaseTask(plan_id=plan.id, server_id=1, job_name="deploy", branch="main", sequence=0, status="WAITING")
+    db.add(task)
+    db.commit()
+
+    client = MagicMock()
+    client.extract_queue_id.return_value = 100
+    client.trigger_build.return_value = "http://jenkins-1.example/queue/item/1/"
+    client.get_build_number_from_queue.return_value = 10
+    client.get_build_status.side_effect = Exception("404 Client Error: Not Found for url")
+
+    with (
+        patch("app.services.release_service.SyncSessionLocal", return_value=db),
+        patch("app.services.release_service.JenkinsClient", return_value=client),
+        patch("app.services.release_service.send_release_notification"),
+    ):
+        plan_id = plan.id
+        task_id = task.id
+        release_service.execute_task_workflow(plan_id, task_id)
+
+    db.expire_all()
+    assert db.get(ReleaseTask, task_id).status == "FAILED"
+    assert db.get(ReleasePlan, plan_id).status == "FAILED"
+    assert db.query(ReleaseHistory).filter_by(task_id=task_id).count() == 1
+
+
+def test_write_history_retains_different_build_numbers_for_same_task():
+    db = external_history_session()
+    user = User(username="op", password_hash="x")
+    db.add(user)
+    db.flush()
+    plan = ReleasePlan(name="p", type="IMMEDIATE", status="WAITING", preflight_status="PASSED", creator_id=user.id)
+    db.add(plan)
+    db.flush()
+    task = ReleaseTask(id=100, plan_id=plan.id, server_id=1, job_name="deploy", branch="main", build_number=10, status="FAILED")
+    db.add(task)
+    db.commit()
+
+    client = MagicMock()
+    client.get_build_console_log.return_value = "log"
+
+    release_service.write_history(db, task, "FAILED", 10, "err", client)
+    task.build_number = 11
+    release_service.write_history(db, task, "SUCCESS", 11, None, client)
+
+    assert db.query(ReleaseHistory).filter_by(task_id=task.id).count() == 2
+    build_numbers = {row.build_number for row in db.query(ReleaseHistory).filter_by(task_id=task.id).all()}
+    assert build_numbers == {10, 11}
+
+
+def test_stop_external_history_build():
+    from app.api.history import stop_external_history_build
+    from fastapi import Request
+
+    db = external_history_session()
+    user = User(username="operator", password_hash="x", role="operator", is_active=True)
+    server = db.query(JenkinsServer).first()
+    history = ReleaseHistory(id=50, server_id=server.id, server_name=server.name, job_name="test-job", build_number=75, status="BUILDING", is_external=True)
+    db.add_all([user, history])
+    db.commit()
+
+    req = Request({
+        "type": "http", "method": "POST", "path": "/history/50/stop",
+        "headers": [], "query_string": b"", "scheme": "http", "server": ("testserver", 80), "client": ("127.0.0.1", 12345)
+    })
+
+    with patch("app.api.history.JenkinsClient") as mock_client_cls, patch("app.api.history.log_action"):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        res = stop_external_history_build(50, req, db, user)
+
+    db.expire_all()
+    record = db.get(ReleaseHistory, 50)
+    assert record.status == "CANCELLED"
+    assert "75" in res["message"]
+    mock_client.stop_build.assert_called_once_with("test-job", 75)

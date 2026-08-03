@@ -123,3 +123,35 @@ def test_zero_plan_retention_keeps_expired_completed_plans():
         clean_expired_data()
 
     assert db.get(ReleasePlan, plan_id) is not None
+
+
+def test_backup_retention_only_counts_successful_backups_and_removes_files_after_commit(tmp_path):
+    from app.models.jenkins import JenkinsBackup
+    db, _user, server = retention_session()
+    
+    file_old_success = tmp_path / "old_succ.zip.enc"
+    file_old_success.write_text("content")
+
+    file_failed_1 = tmp_path / "fail_1.zip.enc"
+    file_failed_1.write_text("content")
+
+    old_succ = JenkinsBackup(server_id=server.id, status="SUCCESS", backup_time=datetime.now() - timedelta(days=2), zip_path=str(file_old_success))
+    new_succ = JenkinsBackup(server_id=server.id, status="SUCCESS", backup_time=datetime.now(), zip_path=str(tmp_path / "new_succ.zip.enc"))
+    fail_1 = JenkinsBackup(server_id=server.id, status="FAILED", backup_time=datetime.now() - timedelta(hours=1), zip_path=str(file_failed_1))
+
+    db.add_all([old_succ, new_succ, fail_1])
+    db.add(SystemConfig(config_key="jenkins_backup_retention_count", config_value="1"))
+    db.commit()
+
+    old_succ_id = old_succ.id
+    new_succ_id = new_succ.id
+    fail_1_id = fail_1.id
+
+    with patch("app.services.data_cleaner.SyncSessionLocal", return_value=db):
+        clean_expired_data()
+
+    assert db.get(JenkinsBackup, new_succ_id) is not None
+    assert db.get(JenkinsBackup, old_succ_id) is None
+    assert not file_old_success.exists()
+    assert db.get(JenkinsBackup, fail_1_id) is not None
+    assert file_failed_1.exists()

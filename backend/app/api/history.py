@@ -1,10 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from loguru import logger
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import List, Optional
 
 from app.core.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_active_admin, get_current_active_operator, log_action
+from app.services.deps_helper import get_client_ip
+from app.models.user import User
 from app.models.release import ReleaseHistory, ReleaseTask
 from app.models.jenkins import JenkinsServer
 from app.schemas.release import ReleaseHistoryResponse, BuildLogResponse
@@ -155,6 +159,67 @@ def sync_external_history(
         pass
     return {"message": "外部构建记录已成功同步"}
 
+
+@router.post("/{history_id}/stop")
+def stop_external_history_build(
+    history_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_operator)
+):
+    history = db.get(ReleaseHistory, history_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="未找到该历史构建记录")
+
+    if history.status not in ["QUEUED", "BUILDING", "RUNNING", "WAITING"]:
+        raise HTTPException(status_code=400, detail="该构建任务已不在运行中，无需终止")
+
+    server = db.get(JenkinsServer, history.server_id) if history.server_id else None
+    if not server and history.server_name:
+        server = db.query(JenkinsServer).filter(JenkinsServer.name == history.server_name).first()
+
+    if not server:
+        server = db.query(JenkinsServer).filter(JenkinsServer.is_active == 1).first()
+
+    if not server:
+        raise HTTPException(status_code=400, detail="无法获取关联的 Jenkins 实例信息")
+
+    client = JenkinsClient(server.url, server.username, server.api_token)
+    stopped = False
+
+    if history.build_number:
+        try:
+            client.stop_build(history.job_name, history.build_number)
+            stopped = True
+        except Exception as exc:
+            logger.warning(f"Failed to stop build #{history.build_number} for {history.job_name}: {exc}")
+
+    queue_id = None
+    if history.raw_response and isinstance(history.raw_response, dict):
+        queue_id = history.raw_response.get("queueId")
+
+    if not stopped and queue_id:
+        try:
+            client.cancel_queue_item(queue_id)
+            stopped = True
+        except Exception as exc:
+            logger.warning(f"Failed to cancel queue item {queue_id}: {exc}")
+
+    history.status = "CANCELLED"
+    history.finished_at = datetime.now()
+    db.commit()
+
+    log_action(db, current_user, "STOP_EXTERNAL_BUILD", get_client_ip(request), f"终止外部手动构建 '{history.job_name}' #{history.build_number or ''}")
+
+    try:
+        from app.core.ws_manager import manager
+        manager.broadcast_event("HISTORY_UPDATE")
+    except Exception:
+        pass
+
+    target_name = f"{history.job_name} #{history.build_number}" if history.build_number else history.job_name
+    return {"message": f"构建 {target_name} 已成功终止"}
+
 from sqlalchemy import text
 
 from app.models.system import AuditLog
@@ -162,7 +227,7 @@ from app.models.system import AuditLog
 @router.post("/reset-sequence")
 def reset_history_sequence(
     db: Session = Depends(get_db),
-    current_user: str = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_admin)
 ):
     """
     Clear all history records and reset the auto-increment ID counter back to 1.

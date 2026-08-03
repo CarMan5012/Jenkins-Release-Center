@@ -133,3 +133,40 @@ def test_pipeline_continue_starts_all_waiting_legacy_dependants():
 
     assert thread_class.call_count == 2
     assert thread_class.return_value.start.call_count == 2
+
+
+def test_retry_single_task_resets_downstream_skipped_tasks():
+    from fastapi import Request
+    from app.api.release import retry_single_task
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+
+    user = User(username="op", password_hash="x", role="operator")
+    server = JenkinsServer(name="j", url="http://j.example", username="u", api_token="t")
+    db.add_all([user, server])
+    db.flush()
+
+    plan = ReleasePlan(name="pipeline", type="PIPELINE", status="FAILED", preflight_status="PASSED", creator_id=user.id)
+    db.add(plan)
+    db.flush()
+
+    t1 = ReleaseTask(plan_id=plan.id, server_id=server.id, job_name="step1", branch="main", sequence=0, status="FAILED", error_message="failed")
+    t2 = ReleaseTask(plan_id=plan.id, server_id=server.id, job_name="step2", branch="main", sequence=1, status="SKIPPED")
+    t3 = ReleaseTask(plan_id=plan.id, server_id=server.id, job_name="step3", branch="main", sequence=2, status="SKIPPED")
+    db.add_all([t1, t2, t3])
+    db.commit()
+
+    req = Request({
+        "type": "http", "method": "POST", "path": f"/plans/{plan.id}/tasks/{t1.id}/retry",
+        "headers": [], "query_string": b"", "scheme": "http", "server": ("testserver", 80), "client": ("127.0.0.1", 12345)
+    })
+    bg_tasks = MagicMock()
+    with patch("app.api.release.log_action"):
+        retry_single_task(req, plan.id, t1.id, bg_tasks, db, user)
+
+    db.expire_all()
+    statuses = [t.status for t in db.query(ReleaseTask).filter_by(plan_id=plan.id).order_by(ReleaseTask.sequence).all()]
+    assert statuses == ["WAITING", "WAITING", "WAITING"]
+    assert db.get(ReleasePlan, plan.id).status == "RUNNING"
+    db.close()

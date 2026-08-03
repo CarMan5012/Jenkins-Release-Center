@@ -501,7 +501,7 @@ def run_job_directly(
     """
     server = db.get(JenkinsServer, server_id)
     job = db.get(JenkinsJob, job_id)
-    if not server or not job:
+    if not server or not job or job.server_id != server_id:
         raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例或对应的 Job")
     if not server.is_active:
         raise HTTPException(status_code=400, detail="该 Jenkins 实例已被禁用，无法运行任务")
@@ -518,6 +518,11 @@ def run_job_directly(
             import time
             time.sleep(1.2)
             sync_external_builds(server_id=server_id, job_name=job.name)
+            try:
+                from app.core.ws_manager import manager
+                manager.broadcast_event("HISTORY_UPDATE")
+            except Exception:
+                pass
             
         background_tasks.add_task(delayed_sync)
         

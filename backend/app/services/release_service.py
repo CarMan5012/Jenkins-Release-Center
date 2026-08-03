@@ -479,9 +479,21 @@ def execute_task_workflow(plan_id: int, task_id: int):
                             db.refresh(task)
                             return
                         db.refresh(task)
-                        task.error_message = f"Jenkins 远端无构建记录 #{build_number}（可能已被手动删除或队列取消）"
+                        task.error_message = (
+                            f"Jenkins 中不存在构建记录 #{build_number}，"
+                            "可能已被删除或取消"
+                        )
                         db.commit()
                         send_release_notification(task.id, "failed")
+                        write_history(
+                            db,
+                            task,
+                            "FAILED",
+                            0,
+                            "JENKINS_BUILD_NOT_FOUND",
+                            client,
+                        )
+                        handle_pipeline_failure(db, plan_id, task_id)
                         return
             time.sleep(poll_interval)
 
@@ -556,23 +568,31 @@ def write_history(db: Session, task: ReleaseTask, status: str, duration: int, ra
         except Exception as e:
             logs = f"Failed to sync build logs: {str(e)}"
 
-    history_filters = [ReleaseHistory.task_id == task.id]
     if (
         task.server_id is not None
         and task.job_name
         and task.build_number is not None
     ):
-        history_filters.append(
+        history_filter = or_(
             and_(
                 ReleaseHistory.server_id == task.server_id,
                 ReleaseHistory.job_name == task.job_name,
                 ReleaseHistory.build_number == task.build_number,
-            )
+            ),
+            and_(
+                ReleaseHistory.task_id == task.id,
+                ReleaseHistory.build_number == task.build_number,
+            ),
+        )
+    else:
+        history_filter = and_(
+            ReleaseHistory.task_id == task.id,
+            ReleaseHistory.build_number.is_(None),
         )
 
     histories = (
         db.query(ReleaseHistory)
-        .filter(or_(*history_filters))
+        .filter(history_filter)
         .order_by(
             ReleaseHistory.task_id.isnot(None).desc(),
             ReleaseHistory.id.desc(),

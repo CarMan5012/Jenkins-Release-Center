@@ -1,15 +1,16 @@
 import json
 import zipfile
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request, BackgroundTasks
 from unittest.mock import patch, MagicMock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.api.deps import get_current_active_admin
 from app.core.database import Base
-from app.api.jenkins import get_git_branches, read_backup_details, router
+from app.api.jenkins import get_git_branches, read_backup_details, run_job_directly, router
 from app.models.jenkins import JenkinsJob, JenkinsServer
+from app.models.user import User
 from app.services.jenkins_client import JenkinsClient
 
 
@@ -258,3 +259,79 @@ def test_get_git_branches_rejects_job_owned_by_another_server(mock_client):
     assert error.value.status_code == 404
     mock_client.assert_not_called()
     db.close()
+
+
+def test_cancel_queue_item_posts_exact_queue_id():
+    client = JenkinsClient("https://jenkins.example", "admin", "token")
+    response = MagicMock(status_code=302, text="")
+    client.session.post = MagicMock(return_value=response)
+    client.get_crumb_headers = MagicMock(
+        return_value={"Jenkins-Crumb": "crumb"}
+    )
+
+    client.cancel_queue_item(42)
+
+    client.session.post.assert_called_once_with(
+        "https://jenkins.example/queue/cancelItem",
+        params={"id": 42},
+        headers={"Jenkins-Crumb": "crumb"},
+        timeout=10,
+        allow_redirects=False,
+    )
+
+
+def test_queue_poll_callback_cancellation_propagates():
+    client = JenkinsClient("https://jenkins.example", "admin", "token")
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"why": "waiting"}
+    client.session.get = MagicMock(return_value=response)
+
+    def cancelled(_why):
+        raise RuntimeError("cancelled by user")
+
+    with pytest.raises(RuntimeError, match="cancelled by user"):
+        client.get_build_number_from_queue(
+            "https://jenkins.example/queue/item/1/",
+            timeout=1,
+            on_poll=cancelled,
+        )
+
+
+def test_run_job_directly_rejects_cross_server_job():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+
+    server_a = JenkinsServer(id=1, name="A", url="http://a.example", username="admin", api_token="tok")
+    server_b = JenkinsServer(id=2, name="B", url="http://b.example", username="admin", api_token="tok")
+    job_b = JenkinsJob(id=10, server_id=2, name="job-on-b")
+    operator = User(id=1, username="op", password_hash="x", role="operator")
+    db.add_all([server_a, server_b, job_b, operator])
+    db.commit()
+
+    req = Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/servers/1/jobs/10/run",
+        "headers": [],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+    })
+
+    with patch.object(JenkinsClient, "trigger_build") as trigger:
+        with pytest.raises(HTTPException) as error:
+            run_job_directly(
+                req,
+                server_a.id,
+                job_b.id,
+                {},
+                BackgroundTasks(),
+                db,
+                operator,
+            )
+
+    assert error.value.status_code == 404
+    trigger.assert_not_called()
+    db.close()

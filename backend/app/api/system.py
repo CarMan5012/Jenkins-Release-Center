@@ -299,7 +299,7 @@ from app.core.security import decrypt_secret
 @router.post("/decrypt-field")
 def decrypt_field_api(
     data: Dict[str, str],
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_admin)
 ):
     cipher_text = data.get("text", "")
     if not cipher_text:
@@ -395,10 +395,13 @@ def get_scheduler_info(
     try:
         from app.services.scheduler import scheduler_manager
         scheduler = getattr(scheduler_manager, "scheduler", None)
-        is_running = scheduler.running if (scheduler and hasattr(scheduler, "running")) else True
+        is_running = bool(
+            scheduler
+            and getattr(scheduler, "running", False)
+        )
     except Exception:
         scheduler = None
-        is_running = True
+        is_running = False
 
     all_jobs = []
     if scheduler and is_running:
@@ -472,8 +475,8 @@ def get_scheduler_info(
                 "name": meta["name"],
                 "trigger_desc": trig_desc,
                 "description": meta["description"],
-                "next_run_time": "已排期监控中",
-                "status": "正常运行"
+                "next_run_time": "未注册" if is_running else "调度器已停止",
+                "status": "未注册" if is_running else "已停止"
             })
 
     possible_db_paths = [
@@ -556,10 +559,10 @@ def get_scheduler_info(
 
     res_data = {
         "scheduler_summary": {
-            "status": "RUNNING",
+            "status": "RUNNING" if is_running else "STOPPED",
             "engine": "自动调度引擎",
             "jobstore": "数据库持久化存储",
-            "total_jobs_count": len(all_jobs) or len(system_cron_tasks)
+            "total_jobs_count": len(all_jobs) if is_running else 0
         },
         "system_cron_tasks": system_cron_tasks,
         "release_scheduled_jobs": release_scheduled_jobs,

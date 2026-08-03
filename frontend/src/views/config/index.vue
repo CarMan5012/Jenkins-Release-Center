@@ -106,7 +106,15 @@
               <div class="info-metric-card">
                 <div class="muted text-xs">后台调度服务</div>
                 <div style="margin-top: 6px; display: flex; align-items: center; gap: 8px;">
-                  <n-tag size="small" type="success" :bordered="false">● 正常运行</n-tag>
+                  <n-tag
+                    size="small"
+                    :type="schedulerInfo.scheduler_summary?.status === 'RUNNING' ? 'success' : 'error'"
+                    :bordered="false"
+                  >
+                    {{ schedulerInfo.scheduler_summary?.status === 'RUNNING'
+                      ? '● 正常运行'
+                      : '● 已停止' }}
+                  </n-tag>
                 </div>
                 <div class="muted text-xs" style="margin-top: 4px;">已接管全量后台自动任务</div>
               </div>
@@ -312,6 +320,7 @@
                 </template>
                 <div style="display: flex; align-items: center; gap: 6px;">
                   <div class="el-number-input">
+                    <!-- v-model:value="planRetention" -->
                     <input
                       type="number"
                       v-model.number="planRetention"

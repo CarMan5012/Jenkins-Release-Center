@@ -523,3 +523,44 @@ def test_parser_extracts_maven_config():
         "root_pom": "api/pom.xml",
         "goals": "clean install"
     }
+
+
+@patch('app.services.jenkins_backup_service.requests.Session')
+def test_execute_jenkins_backup_fails_when_job_config_fails(mock_session_class, tmp_path):
+    from datetime import datetime
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+
+    server = JenkinsServer(id=1, name="j", url="http://j.example", username="u", api_token="t")
+    backup = JenkinsBackup(id=10, server_id=1, backup_time=datetime.now(), status="PENDING", job_count=0)
+    db.add_all([server, backup])
+    db.commit()
+
+    session = MagicMock()
+    mock_session_class.return_value = session
+
+    def mock_get(url, **kwargs):
+        if "job1/config.xml" in url:
+            return MagicMock(status_code=200, text="<project/>")
+        if "job2/config.xml" in url:
+            return MagicMock(status_code=500, text="server error")
+        if "api/json" in url:
+            return MagicMock(status_code=200, json=lambda: {"jobs": [
+                {"name": "job1", "url": "http://j.example/job/job1", "_class": "hudson.model.FreeStyleProject"},
+                {"name": "job2", "url": "http://j.example/job/job2", "_class": "hudson.model.FreeStyleProject"},
+            ]})
+        return MagicMock(status_code=200, text="<crumb/>")
+
+    session.get.side_effect = mock_get
+    session.post.return_value = MagicMock(status_code=200, text="[]")
+
+    with patch("app.services.jenkins_backup_service.SyncSessionLocal", return_value=db):
+        execute_jenkins_backup(server_id=1, backup_id=10)
+
+    db.expire_all()
+    record = db.get(JenkinsBackup, 10)
+    assert record.status == "FAILED"
+    assert record.job_count == 1
+    assert not record.zip_path
+    db.close()
