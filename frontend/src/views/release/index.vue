@@ -148,7 +148,16 @@
             <n-select v-model:value="task.server_id" :options="serverOptions" placeholder="请选择 Jenkins 实例" @update:value="(value) => onTaskServerChange(Number(value), index)" />
             <n-select v-model:value="task.view_id" :options="taskViewOptions[index] || []" placeholder="请选择 View 视图" @update:value="(value) => onTaskViewChange(Number(value), index)" />
             <n-select v-model:value="task.job_id" :options="taskJobOptions[index] || []" placeholder="请选择 Job 任务" @update:value="(value) => onTaskJobChange(Number(value), index)" />
-            <n-select v-model:value="task.branch" :options="taskBranchOptions[index] || []" :placeholder="!task.job_id ? '请先选择 Job 任务' : '选择分支或手动输入分支/Tag'" filterable tag title="提示：可从下拉列表中选择分支，也可直接手动输入分支/Tag" />
+            <n-select
+              v-model:value="task.branch"
+              :options="taskBranchOptions[index] || []"
+              :loading="taskBranchLoading[index]"
+              :placeholder="!task.job_id ? '请先选择 Job 任务' : '选择分支或手动输入分支/Tag'"
+              filterable
+              tag
+              title="提示：可从下拉列表中选择分支，也可直接手动输入分支/Tag"
+              @focus="onBranchFocus(index)"
+            />
           </div>
         </div>
         <n-button dashed block type="primary" @click="addTaskRow">添加任务</n-button>
@@ -302,6 +311,11 @@ const submitLoading = ref(false);
 const taskViewOptions = ref<Record<number, SelectOption[]>>({});
 const taskJobOptions = ref<Record<number, SelectOption[]>>({});
 const taskBranchOptions = ref<Record<number, SelectOption[]>>({});
+const taskBranchLoading = ref<Record<number, boolean>>({});
+const taskBranchLoaded = ref<Record<number, boolean>>({});
+
+const viewCache = new Map<number, Promise<SelectOption[]>>();
+const jobCache = new Map<string, Promise<SelectOption[]>>();
 
 const wizardForm = ref({
   name: '',
@@ -549,6 +563,8 @@ async function openEditWizard(plan: ReleasePlan) {
   taskViewOptions.value = {};
   taskJobOptions.value = {};
   taskBranchOptions.value = {};
+  taskBranchLoading.value = {};
+  taskBranchLoaded.value = {};
 
   const tasks: ReleaseTask[] = [];
   for (let index = 0; index < plan.tasks.length; index++) {
@@ -562,9 +578,14 @@ async function openEditWizard(plan: ReleasePlan) {
       depends_on_task_id: task.depends_on_task_id || null,
       parameters: task.parameters || {},
     });
-    if (task.server_id) await loadTaskViews(task.server_id, index);
-    if (task.server_id && task.view_id) await loadTaskJobs(task.server_id, task.view_id, index);
-    if (task.server_id && task.job_id) await loadTaskBranches(task.server_id, task.job_id, index);
+
+    // Preset initial placeholder options for existing task values so they render instantly
+    if (task.job_id && task.job_name) {
+      taskJobOptions.value[index] = [{ label: task.job_name, value: task.job_id }];
+    }
+    if (task.branch) {
+      taskBranchOptions.value[index] = [{ label: task.branch, value: task.branch }];
+    }
   }
 
   wizardForm.value = {
@@ -576,7 +597,22 @@ async function openEditWizard(plan: ReleasePlan) {
     notify_dingtalk: hasDingTalkConfig.value ? Boolean(plan.notify_dingtalk) : false,
     tasks: tasks.length ? tasks : [emptyTask()],
   };
+
+  // Open wizard modal IMMEDIATELY (0ms delay for user UX)
   showWizard.value = true;
+
+  // Background parallel async fetching for view & job options only.
+  // Branch options are 100% lazy-loaded when user clicks/focuses branch dropdown!
+  loadAllTaskOptionsParallel(plan.tasks);
+}
+
+async function loadAllTaskOptionsParallel(taskList: ReleaseTask[]) {
+  const promises = taskList.map(async (task, index) => {
+    const pView = task.server_id ? loadTaskViews(task.server_id, index) : null;
+    const pJob = (task.server_id && task.view_id) ? loadTaskJobs(task.server_id, task.view_id, index) : null;
+    await Promise.all([pView, pJob].filter(Boolean));
+  });
+  await Promise.all(promises);
 }
 
 function nextStep() {
@@ -624,25 +660,83 @@ function addTaskRow() {
 
 function removeTaskRow(index: number) {
   wizardForm.value.tasks.splice(index, 1);
+  const newViews: Record<number, SelectOption[]> = {};
+  const newJobs: Record<number, SelectOption[]> = {};
+  const newBranches: Record<number, SelectOption[]> = {};
+  const newLoading: Record<number, boolean> = {};
+  const newLoaded: Record<number, boolean> = {};
+
+  wizardForm.value.tasks.forEach((_, i) => {
+    const oldIdx = i >= index ? i + 1 : i;
+    if (taskViewOptions.value[oldIdx]) newViews[i] = taskViewOptions.value[oldIdx];
+    if (taskJobOptions.value[oldIdx]) newJobs[i] = taskJobOptions.value[oldIdx];
+    if (taskBranchOptions.value[oldIdx]) newBranches[i] = taskBranchOptions.value[oldIdx];
+    if (taskBranchLoading.value[oldIdx]) newLoading[i] = taskBranchLoading.value[oldIdx];
+    if (taskBranchLoaded.value[oldIdx]) newLoaded[i] = taskBranchLoaded.value[oldIdx];
+  });
+
+  taskViewOptions.value = newViews;
+  taskJobOptions.value = newJobs;
+  taskBranchOptions.value = newBranches;
+  taskBranchLoading.value = newLoading;
+  taskBranchLoaded.value = newLoaded;
+}
+
+function fetchViewsCached(serverId: number): Promise<SelectOption[]> {
+  if (viewCache.has(serverId)) return viewCache.get(serverId)!;
+  const promise = request
+    .get(`/jenkins/servers/${serverId}/views`)
+    .then((res: any) => (res.data || []).map((view: any) => ({ label: view.name, value: view.id })))
+    .catch(() => {
+      viewCache.delete(serverId);
+      return [];
+    });
+  viewCache.set(serverId, promise);
+  return promise;
+}
+
+function fetchJobsCached(serverId: number, viewId: number): Promise<SelectOption[]> {
+  const key = `${serverId}_${viewId}`;
+  if (jobCache.has(key)) return jobCache.get(key)!;
+  const promise = request
+    .get(`/jenkins/servers/${serverId}/views/${viewId}/jobs`)
+    .then((res: any) => (res.data || []).map((job: any) => ({ label: job.name, value: job.id })))
+    .catch(() => {
+      jobCache.delete(key);
+      return [];
+    });
+  jobCache.set(key, promise);
+  return promise;
 }
 
 async function loadTaskViews(serverId: number, index: number) {
-  const res = await request.get(`/jenkins/servers/${serverId}/views`);
-  taskViewOptions.value[index] = (res.data || []).map((view: any) => ({ label: view.name, value: view.id }));
+  taskViewOptions.value[index] = await fetchViewsCached(serverId);
 }
 
 async function loadTaskJobs(serverId: number, viewId: number, index: number) {
-  const res = await request.get(`/jenkins/servers/${serverId}/views/${viewId}/jobs`);
-  taskJobOptions.value[index] = (res.data || []).map((job: any) => ({ label: job.name, value: job.id }));
+  taskJobOptions.value[index] = await fetchJobsCached(serverId, viewId);
+}
+
+async function onBranchFocus(index: number) {
+  const task = wizardForm.value.tasks[index];
+  if (!task || !task.server_id || !task.job_id) return;
+  // Skip if already loaded or currently loading
+  if (taskBranchLoaded.value[index] || taskBranchLoading.value[index]) return;
+
+  await loadTaskBranches(task.server_id, task.job_id, index);
 }
 
 async function loadTaskBranches(serverId: number, jobId: number, index: number) {
   try {
+    taskBranchLoading.value[index] = true;
     const res = await request.get(`/jenkins/servers/${serverId}/jobs/${jobId}/branches`);
     taskBranchOptions.value[index] = (res.data || []).map((branch: string) => ({ label: branch, value: branch }));
+    taskBranchLoaded.value[index] = true;
   } catch (err: any) {
     taskBranchOptions.value[index] = [];
     message.warning(err.response?.data?.detail || '未获取到分支列表，您可以直接手动输入分支或 Tag');
+  } finally {
+    taskBranchLoading.value[index] = false;
   }
 }
 
@@ -654,6 +748,7 @@ async function onTaskServerChange(value: number, index: number) {
   taskViewOptions.value[index] = [];
   taskJobOptions.value[index] = [];
   taskBranchOptions.value[index] = [];
+  taskBranchLoaded.value[index] = false;
   const server = servers.value.find((item) => item.id === value);
   if (server && !server.is_active) {
     message.warning('该 Jenkins 实例已被禁用，请先启用后再选择。');
@@ -669,6 +764,7 @@ async function onTaskViewChange(value: number, index: number) {
   task.branch = null;
   taskJobOptions.value[index] = [];
   taskBranchOptions.value[index] = [];
+  taskBranchLoaded.value[index] = false;
   if (task.server_id && value) await loadTaskJobs(task.server_id, value, index);
 }
 
@@ -676,16 +772,13 @@ async function onTaskJobChange(value: number, index: number) {
   const task = wizardForm.value.tasks[index];
   task.branch = null;
   taskBranchOptions.value[index] = [];
+  taskBranchLoaded.value[index] = false;
   
   // Save job_name snapshot
   const options = taskJobOptions.value[index] || [];
   const selectedJob = options.find((opt) => opt.value === value);
   if (selectedJob) {
     task.job_name = selectedJob.label;
-  }
-  
-  if (task.server_id && value) {
-    await loadTaskBranches(task.server_id, value, index);
   }
 }
 

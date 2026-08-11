@@ -2,11 +2,12 @@ from datetime import datetime
 import os
 import json
 import zipfile
+import time
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.future import select
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from app.core.database import get_db, SyncSessionLocal
 from app.core.security import encrypt_secret
@@ -438,6 +439,9 @@ def get_all_jobs(
         stmt = stmt.filter(JenkinsJob.name.like(f"%{query}%"))
     return stmt.all()
 
+_BRANCH_CACHE: Dict[Tuple[int, int], Tuple[float, List[str]]] = {}
+_BRANCH_CACHE_TTL = 120  # 120 seconds cache
+
 @router.get("/servers/{server_id}/jobs/{job_id}/branches", response_model=List[str])
 def get_git_branches(
     server_id: int,
@@ -451,7 +455,6 @@ def get_git_branches(
     if not server.is_active:
         raise HTTPException(status_code=400, detail="该 Jenkins 实例已被禁用，无法获取分支信息")
 
-    branches: List[str] = []
     job = (
         db.query(JenkinsJob)
         .filter(JenkinsJob.id == job_id, JenkinsJob.server_id == server_id)
@@ -461,6 +464,15 @@ def get_git_branches(
         raise HTTPException(
             status_code=404, detail="Jenkins server or job was not found"
         )
+
+    cache_key = (server_id, job_id)
+    now = time.time()
+    if cache_key in _BRANCH_CACHE:
+        ts, cached_branches = _BRANCH_CACHE[cache_key]
+        if now - ts < _BRANCH_CACHE_TTL:
+            return cached_branches
+
+    branches: List[str] = []
     try:
         client = JenkinsClient(server.url, server.username, server.api_token)
         branches = client.get_branches_and_tags(job.name)
@@ -489,6 +501,7 @@ def get_git_branches(
     if not branches:
         branches = ["master", "main", "develop", "release"]
 
+    _BRANCH_CACHE[cache_key] = (now, branches)
     return branches
 
 @router.post("/servers/{server_id}/jobs/{job_id}/run")
