@@ -33,7 +33,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { NAlert, NButton, NForm, NFormItem, NInput, useMessage } from 'naive-ui';
 import type { FormInst, FormRules } from 'naive-ui';
@@ -50,6 +50,7 @@ const error = ref('');
 
 const model = ref({ username: '', password: '', captcha_id: '', captcha_code: '' });
 const captchaUrl = ref('');
+let captchaTimer: any = null;
 
 const rules: FormRules = {
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
@@ -57,12 +58,26 @@ const rules: FormRules = {
   captcha_code: [{ required: true, message: '请输入验证码', trigger: 'blur' }],
 };
 
+function clearCaptchaTimer() {
+  if (captchaTimer) {
+    clearTimeout(captchaTimer);
+    captchaTimer = null;
+  }
+}
+
 async function fetchCaptcha() {
+  clearCaptchaTimer();
   try {
     const res = await request.get('/auth/captcha');
     model.value.captcha_id = res.data.captcha_id;
     captchaUrl.value = res.data.image_base64;
     model.value.captcha_code = ''; // reset on fetch
+
+    // 验证码过期自动刷新 (默认 120 秒)
+    const expireMs = (res.data.expires_in || 120) * 1000;
+    captchaTimer = setTimeout(() => {
+      fetchCaptcha();
+    }, expireMs);
   } catch (e) {
     console.error('Failed to fetch captcha', e);
   }
@@ -70,6 +85,10 @@ async function fetchCaptcha() {
 
 onMounted(() => {
   fetchCaptcha();
+});
+
+onUnmounted(() => {
+  clearCaptchaTimer();
 });
 
 

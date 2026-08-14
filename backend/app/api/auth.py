@@ -150,9 +150,13 @@ def get_captcha():
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
     captcha_id = str(uuid.uuid4())
-    captcha_store[captcha_id] = {"code": code.lower(), "expires": now + 300}
+    captcha_store[captcha_id] = {"code": code.lower(), "expires": now + 120}
 
-    return {"captcha_id": captcha_id, "image_base64": f"data:image/png;base64,{img_str}"}
+    return {
+        "captcha_id": captcha_id,
+        "image_base64": f"data:image/png;base64,{img_str}",
+        "expires_in": 120,
+    }
 
 @router.post("/login", response_model=Token)
 def login(
