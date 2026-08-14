@@ -533,8 +533,8 @@ let pollIntervalTimer: any = null;
 
 function isPlanActive(): boolean {
   if (!plan.value) return false;
-  if (['RUNNING', 'QUEUED', 'BUILDING', 'WAITING'].includes(plan.value.status)) return true;
-  if (plan.value.tasks && plan.value.tasks.some((t: any) => ['RUNNING', 'QUEUED', 'BUILDING', 'WAITING'].includes(t.status))) return true;
+  if (['RUNNING', 'QUEUED', 'BUILDING'].includes(plan.value.status)) return true;
+  if (plan.value.tasks && plan.value.tasks.some((t: any) => ['RUNNING', 'QUEUED', 'BUILDING'].includes(t.status))) return true;
   return false;
 }
 

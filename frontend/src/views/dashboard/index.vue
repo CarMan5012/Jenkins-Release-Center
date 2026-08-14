@@ -523,7 +523,7 @@ let pollIntervalTimer: any = null;
 
 function hasActivePlans(): boolean {
   if (!plans.value || !plans.value.length) return false;
-  return plans.value.some((p: any) => ['RUNNING', 'QUEUED', 'BUILDING', 'WAITING'].includes(p.status));
+  return plans.value.some((p: any) => ['RUNNING', 'QUEUED', 'BUILDING'].includes(p.status));
 }
 
 function checkAndTogglePolling() {

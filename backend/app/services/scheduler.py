@@ -73,7 +73,7 @@ class SchedulerManager:
             logger.info("Registered sync_external_builds daily 18:00 cron task.")
             
             # Register interval job to reconcile running release tasks (every 10 seconds)
-            from app.services.release_service import reconcile_running_tasks
+            from app.services.release_service import reconcile_running_tasks, reconcile_overdue_waiting_tasks
             self.scheduler.add_job(
                 reconcile_running_tasks,
                 'interval',
@@ -82,6 +82,15 @@ class SchedulerManager:
                 replace_existing=True
             )
             logger.info("Registered reconcile_running_tasks background task (10s interval).")
+
+            self.scheduler.add_job(
+                reconcile_overdue_waiting_tasks,
+                'interval',
+                seconds=10,
+                id="reconcile_overdue_waiting_tasks",
+                replace_existing=True
+            )
+            logger.info("Registered reconcile_overdue_waiting_tasks background task (10s interval).")
             
             # Register cron job to clean up expired data daily at 3:00 AM
             from app.services.data_cleaner import clean_expired_data

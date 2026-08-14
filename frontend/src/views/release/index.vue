@@ -847,7 +847,7 @@ let fetchPlansTimer: any = null;
 let pollIntervalTimer: any = null;
 
 function hasActivePlans(list: ReleasePlan[]): boolean {
-  return list.some(p => ['RUNNING', 'QUEUED', 'BUILDING', 'WAITING'].includes(p.status));
+  return list.some(p => ['RUNNING', 'QUEUED', 'BUILDING'].includes(p.status));
 }
 
 function checkAndTogglePolling() {

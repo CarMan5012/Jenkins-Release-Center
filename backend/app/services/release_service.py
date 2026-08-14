@@ -18,7 +18,8 @@ from app.services.notification import (
 from app.services.release_preflight import preflight_block_reason
 from app.core.ws_manager import manager
 
-ACTIVE_TASK_STATUSES = ("QUEUED", "BUILDING", "RUNNING")
+ACTIVE_TASK_STATUSES = ("WAITING", "QUEUED", "BUILDING", "RUNNING")
+JENKINS_DISPATCH_SEMAPHORE = threading.Semaphore(5)
 
 
 def claim_task_final_state(
@@ -138,25 +139,74 @@ def resolve_task_build_number(
 ) -> Optional[int]:
     if task.build_number is not None:
         return task.build_number
-    if task.jenkins_queue_id is None:
+
+    number = None
+    recent_builds = client.get_recent_builds(task.job_name, 20)
+
+    # 1. First priority: Exact Jenkins Queue ID matching (100% precision)
+    if task.jenkins_queue_id is not None:
+        queue_item = client.get_queue_item(task.jenkins_queue_id)
+        number = ((queue_item or {}).get("executable") or {}).get("number")
+        if number is None and recent_builds:
+            number = next(
+                (
+                    build.get("number")
+                    for build in recent_builds
+                    if build.get("queueId") == task.jenkins_queue_id
+                ),
+                None,
+            )
+
+    # 2. Second priority: Match build parameter _JRC_TASK_ID == task.id (100% precision)
+    if number is None and recent_builds:
+        for build in recent_builds:
+            actions = build.get("actions") or []
+            for action in actions:
+                if isinstance(action, dict) and "parameters" in action:
+                    params = action.get("parameters") or []
+                    for p in params:
+                        if isinstance(p, dict) and p.get("name") == "_JRC_TASK_ID" and str(p.get("value")) == str(task.id):
+                            number = build.get("number")
+                            break
+                if number is not None:
+                    break
+
+    # 3. Third priority: Strict timestamp matching AFTER task execution started (strictly started_at - 5s)
+    if number is None and recent_builds:
+        if task.started_at:
+            ref_ts = (task.started_at - timedelta(seconds=5)).timestamp() * 1000
+        elif task.scheduled_time:
+            ref_ts = (task.scheduled_time - timedelta(seconds=5)).timestamp() * 1000
+        else:
+            ref_ts = (task.created_at - timedelta(seconds=30)).timestamp() * 1000 if task.created_at else 0
+
+        # Only accept builds generated AFTER ref_ts; select the earliest matching build generated right after launch
+        valid_candidates = [
+            b for b in recent_builds
+            if b.get("number") and (b.get("timestamp") or 0) >= ref_ts
+        ]
+        if valid_candidates:
+            # Sort by timestamp ascending to get the build launched immediately following task start
+            valid_candidates.sort(key=lambda b: b.get("timestamp") or 0)
+            number = valid_candidates[0]["number"]
+
+    if number is None:
+        if task.jenkins_queue_id is not None:
+            task.error_message = (
+                f"Jenkins 队列节点已接收 (Queue ID: #{task.jenkins_queue_id})，等待 Jenkins 分配最新构建号..."
+            )
+        else:
+            task.error_message = f"未在 Jenkins 上检测到 [{task.job_name}] 本次运行发起的最新构建号"
+        db.commit()
         return None
 
-    queue_item = client.get_queue_item(task.jenkins_queue_id)
-    number = ((queue_item or {}).get("executable") or {}).get("number")
     if number is None:
-        number = next(
-            (
-                build.get("number")
-                for build in client.get_recent_builds(task.job_name, 20)
-                if build.get("queueId") == task.jenkins_queue_id
-            ),
-            None,
-        )
-
-    if number is None:
-        task.error_message = (
-            f"Jenkins 队列节点已接收 (Queue ID: #{task.jenkins_queue_id})，等待 Jenkins 分配构建号..."
-        )
+        if task.jenkins_queue_id is not None:
+            task.error_message = (
+                f"Jenkins 队列节点已接收 (Queue ID: #{task.jenkins_queue_id})，等待 Jenkins 分配构建号..."
+            )
+        else:
+            task.error_message = f"未在 Jenkins 上检测到 [{task.job_name}] 的有效构建号"
         db.commit()
         return None
 
@@ -247,6 +297,61 @@ def reconcile_running_tasks():
     finally:
         db.close()
 
+
+def reconcile_overdue_waiting_tasks():
+    """
+    Scheduled background task to inspect and recover any release tasks stuck in WAITING status
+    past their scheduled execution time within a strict 5-minute safety window.
+    """
+    db: Session = SyncSessionLocal()
+    try:
+        now_time = datetime.now()
+        overdue_tasks = (
+            db.query(ReleaseTask)
+            .join(ReleasePlan, ReleaseTask.plan_id == ReleasePlan.id)
+            .filter(
+                ReleaseTask.status == "WAITING",
+                ReleaseTask.scheduled_time.isnot(None),
+                ReleaseTask.scheduled_time <= now_time - timedelta(seconds=15),
+                ReleasePlan.status.in_(["WAITING", "RUNNING"]),
+            )
+            .all()
+        )
+        if not overdue_tasks:
+            return
+
+        logger.info(f"Scheduled reconciliation: Found {len(overdue_tasks)} overdue WAITING tasks.")
+        for task in overdue_tasks:
+            try:
+                # 生产安全策略：只允许在 5 分钟 (300 秒) 窗口内进行线程/锁竞争的补发。超出 5 分钟严禁自动发版，直接安全拦截标为 FAILED
+                if task.scheduled_time and (now_time - task.scheduled_time).total_seconds() > 300:
+                    logger.warning(f"Task {task.id} scheduled time ({task.scheduled_time}) missed safety window (> 5m). Marking as FAILED for production safety.")
+                    task.status = "FAILED"
+                    task.error_message = "已超过计划时间 5 分钟安全容错窗口，系统已安全拦截，请人工确认后手动运行"
+                    task.finished_at = now_time
+                    db.commit()
+                    handle_pipeline_failure(db, task.plan_id, task.id)
+                else:
+                    plan = db.query(ReleasePlan).filter(ReleasePlan.id == task.plan_id).first()
+                    reason = preflight_block_reason(plan) if plan else "Plan not found"
+                    if reason:
+                        task.status = "FAILED"
+                        task.error_message = f"自动补发被阻断: {reason}"
+                        task.finished_at = now_time
+                        db.commit()
+                        handle_pipeline_failure(db, task.plan_id, task.id)
+                    else:
+                        logger.info(f"Triggering safety recovery execution for task {task.id} (Plan {task.plan_id}) within 5m window")
+                        t = threading.Thread(target=execute_task_workflow, args=(task.plan_id, task.id))
+                        t.start()
+            except Exception as ex:
+                logger.error(f"Failed recovering overdue waiting task {task.id}: {str(ex)}")
+    except Exception as e:
+        logger.error(f"Error during scheduled batch overdue waiting task reconciliation: {str(e)}")
+    finally:
+        db.close()
+
+
 def execute_task_workflow(plan_id: int, task_id: int):
     """
     Core release task workflow execution: updates DB states, calls Jenkins, polls status, logs history,
@@ -300,8 +405,28 @@ def execute_task_workflow(plan_id: int, task_id: int):
                     db.commit()
                     logger.warning(f"Release task blocked after claim rejection: {reason}")
                     return
-            logger.warning(f"Task {task_id} is already running or completed. Skipping execution.")
-            return
+
+                # Retry claim for WAITING task when preflight passes
+                retry_stmt = (
+                    update(ReleaseTask)
+                    .where(
+                        ReleaseTask.id == task_id,
+                        ReleaseTask.plan_id == plan_id,
+                        ReleaseTask.status == "WAITING",
+                    )
+                    .values(status="RUNNING", started_at=now_time)
+                    .execution_options(synchronize_session=False)
+                )
+                retry_res = db.execute(retry_stmt)
+                db.commit()
+                if retry_res.rowcount == 1:
+                    logger.info(f"Task {task_id} successfully claimed RUNNING state on retry.")
+                else:
+                    logger.warning(f"Task {task_id} claim retry failed or already running/completed. Skipping execution.")
+                    return
+            else:
+                logger.warning(f"Task {task_id} is already running or completed. Skipping execution.")
+                return
 
         db.refresh(task)
 
@@ -320,18 +445,26 @@ def execute_task_workflow(plan_id: int, task_id: int):
 
         client = JenkinsClient(server.url, server.username, server.api_token)
 
-        # 3. Trigger build with backoff retries
+        # 3. Trigger build with backoff retries & rate-limited semaphore
         logger.info(f"Triggering build: Job='{task.job_name}' on Server='{server.name}'")
         queue_url = None
         max_retries = 3
         retry_delay = 5
         
+        # Smooth staggering micro-delay based on sequence to prevent instantaneous API thundering
+        if task.sequence > 0:
+            time.sleep(min(0.05 * (task.sequence % 10), 0.5))
+
+        trigger_params = dict(task.parameters) if task.parameters else {}
+        trigger_params["_JRC_TASK_ID"] = str(task.id)
+
         for attempt in range(1, max_retries + 1):
             try:
-                queue_url = client.trigger_build(task.job_name, task.parameters, branch=task.branch)
+                with JENKINS_DISPATCH_SEMAPHORE:
+                    queue_url = client.trigger_build(task.job_name, trigger_params, branch=task.branch)
                 break
             except Exception as e:
-                logger.warning(f"Attempt {attempt} to trigger Jenkins build failed: {str(e)}")
+                logger.warning(f"Attempt {attempt} to trigger Jenkins build failed for task {task_id}: {str(e)}")
                 if "HTTP 404" in str(e) or "404" in str(e):
                     raise Exception(f"Job does not exist on Jenkins server: {task.job_name}")
                 if attempt == max_retries:

@@ -396,3 +396,114 @@ def test_update_removes_old_schedule_after_database_commit():
         )
 
     assert result.tasks[0].id != old_task_id
+
+
+def test_reconcile_overdue_waiting_tasks_triggers_recovery():
+    from app.services.release_service import reconcile_overdue_waiting_tasks
+    db, user, server, old_job, _new_job = release_session()
+    plan = ReleasePlan(
+        name="overdue_plan",
+        type="SCHEDULED",
+        execute_time=datetime.now() - timedelta(minutes=2),
+        status="WAITING",
+        creator_id=user.id,
+        preflight_status="PASSED",
+    )
+    db.add(plan)
+    db.flush()
+    task = ReleaseTask(
+        plan_id=plan.id,
+        server_id=server.id,
+        job_id=old_job.id,
+        job_name=old_job.name,
+        branch="main",
+        status="WAITING",
+        scheduled_time=datetime.now() - timedelta(minutes=2),
+    )
+    db.add(task)
+    db.commit()
+
+    SessionMaker = sessionmaker(bind=db.get_bind())
+    with (
+        patch("app.services.release_service.SyncSessionLocal", SessionMaker),
+        patch("threading.Thread") as mock_thread,
+    ):
+        reconcile_overdue_waiting_tasks()
+        mock_thread.assert_called_once()
+
+
+def test_reconcile_overdue_waiting_tasks_marks_severely_overdue_as_failed():
+    from app.services.release_service import reconcile_overdue_waiting_tasks
+    db, user, server, old_job, _new_job = release_session()
+    plan = ReleasePlan(
+        name="severely_overdue_plan",
+        type="SCHEDULED",
+        execute_time=datetime.now() - timedelta(hours=2),
+        status="WAITING",
+        creator_id=user.id,
+        preflight_status="PASSED",
+    )
+    db.add(plan)
+    db.flush()
+    task = ReleaseTask(
+        plan_id=plan.id,
+        server_id=server.id,
+        job_id=old_job.id,
+        job_name=old_job.name,
+        branch="main",
+        status="WAITING",
+        scheduled_time=datetime.now() - timedelta(hours=2),
+    )
+    db.add(task)
+    db.commit()
+
+    SessionMaker = sessionmaker(bind=db.get_bind())
+    with patch("app.services.release_service.SyncSessionLocal", SessionMaker):
+        reconcile_overdue_waiting_tasks()
+
+    check_db = SessionMaker()
+    task_after = check_db.get(ReleaseTask, task.id)
+    assert task_after.status == "FAILED"
+    assert "5 分钟安全容错窗口" in task_after.error_message
+
+
+def test_resolve_task_build_number_fallbacks_to_recent_builds_when_queue_id_missing():
+    from app.services.release_service import resolve_task_build_number
+    db, user, server, old_job, _new_job = release_session()
+    plan = ReleasePlan(
+        name="sync_plan",
+        type="SCHEDULED",
+        execute_time=datetime.now(),
+        status="WAITING",
+        creator_id=user.id,
+        preflight_status="PASSED",
+    )
+    db.add(plan)
+    db.flush()
+    task = ReleaseTask(
+        plan_id=plan.id,
+        server_id=server.id,
+        job_id=old_job.id,
+        job_name=old_job.name,
+        branch="main",
+        status="WAITING",
+        jenkins_queue_id=None,
+        build_number=None,
+    )
+    db.add(task)
+    db.commit()
+
+    class MockJenkinsClient:
+        def get_queue_item(self, queue_id):
+            return None
+        def get_recent_builds(self, job_name, limit=10):
+            return [{"number": 42, "timestamp": int(datetime.now().timestamp() * 1000)}]
+
+    resolved = resolve_task_build_number(db, task, MockJenkinsClient())
+    assert resolved == 42
+    assert task.build_number == 42
+
+
+def test_jenkins_dispatch_semaphore_rate_limits_trigger_calls():
+    from app.services.release_service import JENKINS_DISPATCH_SEMAPHORE
+    assert JENKINS_DISPATCH_SEMAPHORE._value <= 5

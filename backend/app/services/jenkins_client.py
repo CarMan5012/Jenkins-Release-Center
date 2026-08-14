@@ -238,6 +238,11 @@ class JenkinsClient:
         if merged_params:
             url = urljoin(self.base_url, f"{job_path}/buildWithParameters")
             response = self.session.post(url, data=merged_params, headers=headers, timeout=10)
+            # If job is not parameterized (HTTP 400/404 error from Jenkins), fallback to simple /build
+            if response.status_code in [400, 404] and not parameters and not branch:
+                logger.info(f"Job {job_name} is not parameterized. Falling back to simple /build trigger.")
+                url_simple = urljoin(self.base_url, f"{job_path}/build")
+                response = self.session.post(url_simple, headers=headers, timeout=10)
         else:
             url = urljoin(self.base_url, f"{job_path}/build")
             response = self.session.post(url, headers=headers, timeout=10)
