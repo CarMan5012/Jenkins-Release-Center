@@ -126,6 +126,14 @@ def send_notification_to_channel(
 _sent_notifications_cache = set()
 
 
+def clear_plan_notifications_cache(plan_id: int):
+    """
+    清除指定发布计划的通知发送防重缓存，用于重试、重新执行场景。
+    """
+    _sent_notifications_cache.discard(f"plan_start:{plan_id}")
+    _sent_notifications_cache.discard(f"plan_summary:{plan_id}")
+
+
 def get_plan_environment(db: Session, plan_tasks: List[ReleaseTask]) -> str:
     """
     提取发布计划关联的所有 Jenkins Job 的 View（环境）名称。
@@ -217,7 +225,7 @@ def send_plan_start_notification(plan_id: int):
         plain_content = f"计划名称: {plan.name}, 视图: {environment}, Job 数量: {total_jobs} 个, 当前状态: 执行中"
         system_url_config = db.query(SystemConfig).filter(SystemConfig.config_key == "system_url").first()
         base_url = system_url_config.config_value.rstrip('/') if system_url_config and system_url_config.config_value else "http://localhost:3000"
-        detail_url = f"{base_url}/#/release/detail/{plan.id}"
+        detail_url = f"{base_url}/release/{plan.id}"
 
         for config in configs:
             if config.channel_type == "DINGTALK":
@@ -278,7 +286,7 @@ def send_plan_summary_notification(plan_id: int):
         duration_str = format_duration(duration_seconds)
         system_url_config = db.query(SystemConfig).filter(SystemConfig.config_key == "system_url").first()
         base_url = system_url_config.config_value.rstrip('/') if system_url_config and system_url_config.config_value else "http://localhost:3000"
-        detail_url = f"{base_url}/#/release/detail/{plan.id}"
+        detail_url = f"{base_url}/release/{plan.id}"
 
         # 划分终态类型：发布取消 / 发布失败 / 发布成功
         if plan.status == "CANCELLED":

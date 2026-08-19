@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.api.deps import get_current_active_admin
+from app.api.deps import get_current_active_admin, get_current_active_operator
 from app.core.database import Base
 from app.api.jenkins import get_git_branches, read_backup_details, run_job_directly, router
 from app.models.jenkins import JenkinsJob, JenkinsServer
@@ -72,8 +72,9 @@ def test_queue_wait_does_not_expire_while_jenkins_reports_pending(monkeypatch):
     ) == 42
 
 
+@patch.object(JenkinsClient, 'get_crumb_headers', return_value={})
 @patch('requests.Session.post')
-def test_jenkins_stop_build_posts_to_stop_endpoint(mock_post):
+def test_jenkins_stop_build_posts_to_stop_endpoint(mock_post, mock_crumb):
     mock_response = MagicMock()
     mock_response.status_code = 302
     mock_post.return_value = mock_response
@@ -145,6 +146,17 @@ def test_plaintext_backup_routes_require_admin():
             dependency.call is get_current_active_admin
             for dependency in route.dependant.dependencies
         )
+
+
+def test_delete_backup_route_requires_operator():
+    delete_route = next(
+        route for route in router.routes
+        if route.path == "/servers/{server_id}/backups/{backup_id}" and "DELETE" in route.methods
+    )
+    assert any(
+        dependency.call is get_current_active_operator
+        for dependency in delete_route.dependant.dependencies
+    )
 
 
 @patch('requests.Session.get')

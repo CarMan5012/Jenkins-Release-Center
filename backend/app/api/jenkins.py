@@ -23,6 +23,7 @@ from app.schemas.jenkins import (
 )
 from app.services.jenkins_client import JenkinsClient
 from app.services.jenkins_sync_task import sync_external_builds
+from app.services.scheduler import scheduler_manager
 
 router = APIRouter()
 
@@ -205,12 +206,25 @@ def delete_server(
     if not server:
         raise HTTPException(status_code=404, detail="未找到该 Jenkins 实例")
 
-    # 强制级联删除所有关联的发布计划、任务和历史记录
     from app.models.release import ReleasePlan, ReleaseTask, ReleaseHistory
 
-    # 查找所有与该实例相关的发布计划 ID
-    tasks = db.query(ReleaseTask.plan_id).filter(ReleaseTask.server_id == server_id).distinct().all()
-    plan_ids = [t[0] for t in tasks]
+    # 检查是否有正在运行中的发布计划
+    running_plan = (
+        db.query(ReleasePlan)
+        .join(ReleaseTask, ReleaseTask.plan_id == ReleasePlan.id)
+        .filter(ReleaseTask.server_id == server_id, ReleasePlan.status == "RUNNING")
+        .first()
+    )
+    if running_plan:
+        raise HTTPException(status_code=400, detail=f"该实例关联了正在运行中的发布计划 [{running_plan.name}]，禁止删除")
+
+    # 查找所有与该实例相关的任务及计划 ID
+    tasks = db.query(ReleaseTask).filter(ReleaseTask.server_id == server_id).all()
+    plan_ids = list({t.plan_id for t in tasks})
+
+    # 清理所有待删除计划在调度器中的任务
+    for t in tasks:
+        scheduler_manager.remove_release_job(t.plan_id, t.id)
 
     try:
         if plan_ids:
@@ -688,7 +702,7 @@ def delete_backup(
     server_id: int,
     backup_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_operator)
 ):
     backup = db.get(JenkinsBackup, backup_id)
     if not backup or backup.server_id != server_id:

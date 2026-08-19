@@ -141,54 +141,68 @@ def resolve_task_build_number(
         return task.build_number
 
     number = None
-    recent_builds = client.get_recent_builds(task.job_name, 20)
 
     # 1. First priority: Exact Jenkins Queue ID matching (100% precision)
     if task.jenkins_queue_id is not None:
         queue_item = client.get_queue_item(task.jenkins_queue_id)
         number = ((queue_item or {}).get("executable") or {}).get("number")
-        if number is None and recent_builds:
+
+    recent_builds = None
+
+    def get_cached_recent_builds():
+        nonlocal recent_builds
+        if recent_builds is None:
+            recent_builds = client.get_recent_builds(task.job_name, 20) or []
+        return recent_builds
+
+    if number is None and task.jenkins_queue_id is not None:
+        builds = get_cached_recent_builds()
+        if builds:
             number = next(
                 (
                     build.get("number")
-                    for build in recent_builds
+                    for build in builds
                     if build.get("queueId") == task.jenkins_queue_id
                 ),
                 None,
             )
 
     # 2. Second priority: Match build parameter _JRC_TASK_ID == task.id (100% precision)
-    if number is None and recent_builds:
-        for build in recent_builds:
-            actions = build.get("actions") or []
-            for action in actions:
-                if isinstance(action, dict) and "parameters" in action:
-                    params = action.get("parameters") or []
-                    for p in params:
-                        if isinstance(p, dict) and p.get("name") == "_JRC_TASK_ID" and str(p.get("value")) == str(task.id):
-                            number = build.get("number")
-                            break
-                if number is not None:
-                    break
+    if number is None:
+        builds = get_cached_recent_builds()
+        if builds:
+            for build in builds:
+                actions = build.get("actions") or []
+                for action in actions:
+                    if isinstance(action, dict) and "parameters" in action:
+                        params = action.get("parameters") or []
+                        for p in params:
+                            if isinstance(p, dict) and p.get("name") == "_JRC_TASK_ID" and str(p.get("value")) == str(task.id):
+                                number = build.get("number")
+                                break
+                    if number is not None:
+                        break
 
     # 3. Third priority: Strict timestamp matching AFTER task execution started (strictly started_at - 5s)
-    if number is None and recent_builds:
-        if task.started_at:
-            ref_ts = (task.started_at - timedelta(seconds=5)).timestamp() * 1000
-        elif task.scheduled_time:
-            ref_ts = (task.scheduled_time - timedelta(seconds=5)).timestamp() * 1000
-        else:
-            ref_ts = (task.created_at - timedelta(seconds=30)).timestamp() * 1000 if task.created_at else 0
+    if number is None:
+        builds = get_cached_recent_builds()
+        if builds:
+            if task.started_at:
+                ref_ts = (task.started_at - timedelta(seconds=5)).timestamp() * 1000
+            elif task.scheduled_time:
+                ref_ts = (task.scheduled_time - timedelta(seconds=5)).timestamp() * 1000
+            else:
+                ref_ts = (task.created_at - timedelta(seconds=30)).timestamp() * 1000 if task.created_at else 0
 
-        # Only accept builds generated AFTER ref_ts; select the earliest matching build generated right after launch
-        valid_candidates = [
-            b for b in recent_builds
-            if b.get("number") and (b.get("timestamp") or 0) >= ref_ts
-        ]
-        if valid_candidates:
-            # Sort by timestamp ascending to get the build launched immediately following task start
-            valid_candidates.sort(key=lambda b: b.get("timestamp") or 0)
-            number = valid_candidates[0]["number"]
+            # Only accept builds generated AFTER ref_ts; select the earliest matching build generated right after launch
+            valid_candidates = [
+                b for b in builds
+                if b.get("number") and (b.get("timestamp") or 0) >= ref_ts
+            ]
+            if valid_candidates:
+                # Sort by timestamp ascending to get the build launched immediately following task start
+                valid_candidates.sort(key=lambda b: b.get("timestamp") or 0)
+                number = valid_candidates[0]["number"]
 
     if number is None:
         if task.jenkins_queue_id is not None:
@@ -197,16 +211,6 @@ def resolve_task_build_number(
             )
         else:
             task.error_message = f"未在 Jenkins 上检测到 [{task.job_name}] 本次运行发起的最新构建号"
-        db.commit()
-        return None
-
-    if number is None:
-        if task.jenkins_queue_id is not None:
-            task.error_message = (
-                f"Jenkins 队列节点已接收 (Queue ID: #{task.jenkins_queue_id})，等待 Jenkins 分配构建号..."
-            )
-        else:
-            task.error_message = f"未在 Jenkins 上检测到 [{task.job_name}] 的有效构建号"
         db.commit()
         return None
 
@@ -814,6 +818,9 @@ def handle_pipeline_failure(db: Session, plan_id: int, task_id: int):
             
             plan.status = "FAILED"
             db.commit()
+            logger.info(f"Release Plan {plan_id} terminated due to pipeline failure. Final status: FAILED")
+            send_plan_summary_notification(plan_id)
+            manager.broadcast_event("RELEASE_UPDATE", {"plan_id": plan_id, "status": "FAILED"})
             return
         else: # CONTINUE
             # Launch every waiting dependant for compatibility with legacy branching plans.

@@ -6,6 +6,7 @@ sqlite_key
 # 本地数据与加密数据库备份
 backend/data/*.db
 backend/data/*.pem
+data/
 
 # 编译依赖、环境变量与系统缓存
 __pycache__/

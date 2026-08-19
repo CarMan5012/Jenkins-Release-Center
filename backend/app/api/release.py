@@ -15,6 +15,7 @@ from app.schemas.release import ReleasePlanCreate, ReleasePlanResponse, ReleaseP
 from app.services.scheduler import scheduler_manager
 from app.services.release_preflight import preflight_block_reason, run_release_preflight
 from app.services.release_service import execute_release_task
+from app.services.notification import clear_plan_notifications_cache
 
 from loguru import logger
 from app.services.deps_helper import get_client_ip, normalize_idempotency_key
@@ -612,6 +613,9 @@ def trigger_plan_immediately(
     for t in plan.tasks:
         scheduler_manager.remove_release_job(plan.id, t.id)
 
+    # Clear notification dedup cache for clean trigger
+    clear_plan_notifications_cache(plan.id)
+
     # Launch execution asynchronously
     if plan.type == "PIPELINE":
         first_task = next((t for t in plan.tasks if t.sequence == 0), None)
@@ -667,6 +671,9 @@ def retry_plan_immediately(
 
     for t in plan.tasks:
         scheduler_manager.remove_release_job(plan.id, t.id)
+
+    # Clear notification dedup cache for retry
+    clear_plan_notifications_cache(plan.id)
 
     if plan.type == "PIPELINE":
         first_task = next((t for t in plan.tasks if t.sequence == 0), None)
@@ -740,6 +747,9 @@ def retry_single_task(
 
     # 移除可能存在的定时调度项
     scheduler_manager.remove_release_job(plan.id, task.id)
+
+    # Clear notification dedup cache for task retry
+    clear_plan_notifications_cache(plan.id)
 
     # 提交给后台异步调度单独执行该 Task
     background_tasks.add_task(execute_release_task, plan.id, task.id)
